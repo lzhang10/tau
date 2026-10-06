@@ -1,3 +1,4 @@
+const TAU_BASE = new URL('.', import.meta.url).href; // issue 170
 /**
  * Launcher — project directory picker with visual bubbles
  */
@@ -12,7 +13,7 @@ export class Launcher {
   async load() {
     this.container.innerHTML = '<div class="launcher-loading">Loading projects…</div>';
     try {
-      const res = await fetch('/api/projects');
+      const res = await fetch(TAU_BASE + 'api/projects');
       const data = await res.json();
       this.projects = data.projects || [];
       this.render();

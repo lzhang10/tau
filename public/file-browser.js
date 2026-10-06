@@ -1,3 +1,4 @@
+const TAU_BASE = new URL('.', import.meta.url).href; // issue 170
 /**
  * File Browser — right sidebar file tree with drag-and-drop
  */
@@ -53,8 +54,8 @@ export class FileBrowser {
 
     try {
       const url = dirPath
-        ? `/api/files?path=${encodeURIComponent(dirPath)}`
-        : '/api/files';
+        ? TAU_BASE + `api/files?path=${encodeURIComponent(dirPath)}`
+        : TAU_BASE + 'api/files';
       const res = await fetch(url);
       const data = await res.json();
 
@@ -141,7 +142,7 @@ export class FileBrowser {
 
   async openNatively(filePath) {
     try {
-      await fetch('/api/open', {
+      await fetch(TAU_BASE + 'api/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filePath }),

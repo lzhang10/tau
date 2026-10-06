@@ -1,3 +1,4 @@
+const TAU_BASE = new URL('.', import.meta.url).href; // issue 170
 /**
  * Main App - Ties everything together
  */
@@ -14,7 +15,7 @@ import { Launcher } from './launcher.js';
 
 
 // Initialize components
-const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
+const wsUrl = new URL('ws', import.meta.url).href.replace(/^http/, 'ws');
 const wsClient = new WebSocketClient(wsUrl);
 const state = new StateManager();
 const messageRenderer = new MessageRenderer(document.getElementById('messages'));
@@ -98,7 +99,7 @@ fileSidebarUp.addEventListener('click', () => {
   if (parent) fileBrowser.load(parent);
 });
 
-fetch('/api/health').then(r => r.json()).then(data => {
+fetch(TAU_BASE + 'api/health').then(r => r.json()).then(data => {
   const names = { win32: 'Explorer', darwin: 'Finder', linux: 'file manager' };
   const name = names[data.platform] || 'file manager';
   document.getElementById('file-sidebar-finder').title = `Open in ${name}`;
@@ -106,7 +107,7 @@ fetch('/api/health').then(r => r.json()).then(data => {
 
 document.getElementById('file-sidebar-finder').addEventListener('click', () => {
   if (fileBrowser.currentPath) {
-    fetch('/api/open', {
+    fetch(TAU_BASE + 'api/open', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filePath: fileBrowser.currentPath }),
@@ -611,7 +612,7 @@ function renderAttachmentPreviews() {
       el.title = fp.path;
       const thumb = document.createElement('img');
       thumb.style.cssText = 'width:100%;height:100%;object-fit:cover';
-      thumb.src = `/api/file/preview?path=${encodeURIComponent(fp.path)}`;
+      thumb.src = TAU_BASE + `api/file/preview?path=${encodeURIComponent(fp.path)}`;
       thumb.onerror = () => {
         el.classList.add('file-chip');
         thumb.remove();
@@ -779,7 +780,7 @@ commandPaletteOverlay.addEventListener('click', closeCommandPalette);
 async function rpcCommand(cmd, statusMsg) {
   try {
     if (statusMsg) statusText.textContent = statusMsg;
-    const resp = await fetch('/api/rpc', {
+    const resp = await fetch(TAU_BASE + 'api/rpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cmd),
@@ -843,8 +844,8 @@ let currentThinkingLevel = 'off';
 async function fetchModelInfo() {
   try {
     const [modelsResp, stateResp] = await Promise.all([
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models' }) }),
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_state' }) }),
+      fetch(TAU_BASE + 'api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models' }) }),
+      fetch(TAU_BASE + 'api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_state' }) }),
     ]);
     const modelsData = await modelsResp.json();
     const stateData = await stateResp.json();
@@ -1157,7 +1158,7 @@ async function switchSession(sessionFile, session = null, project = null) {
 
       if (dirName && file) {
         try {
-          const res = await fetch(`/api/sessions/${dirName}/${file}`);
+          const res = await fetch(TAU_BASE + `api/sessions/${dirName}/${file}`);
           console.log('[App] History fetch status:', res.status);
           const data = await res.json();
           console.log('[App] History entries:', data.entries?.length || 0);
@@ -1201,7 +1202,7 @@ async function switchSession(sessionFile, session = null, project = null) {
         wsClient.send({ type: 'mirror_sync_request' });
       }
     } else {
-      const res = await fetch('/api/sessions/switch', {
+      const res = await fetch(TAU_BASE + 'api/sessions/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionFile }),
@@ -1276,7 +1277,7 @@ function updateMirrorLiveIndicator() {
 // Poll for running instances to mark all live sessions
 async function pollInstances() {
   try {
-    const res = await fetch('/api/instances');
+    const res = await fetch(TAU_BASE + 'api/instances');
     if (res.ok) {
       const data = await res.json();
       liveInstances = data.instances || [];
@@ -1490,7 +1491,7 @@ function updateConnectionStatus(status) {
     statusText.title = tailscaleUrl || '';
     // Fetch tailscale info on first connect
     if (!tailscaleUrl) {
-      fetch('/api/health').then(r => r.json()).then(data => {
+      fetch(TAU_BASE + 'api/health').then(r => r.json()).then(data => {
         if (data.tailscaleUrl) {
           tailscaleUrl = data.tailscaleUrl;
           statusText.textContent = 'Connected • TS';
@@ -1582,7 +1583,7 @@ async function openSettings() {
 
   // Fetch current state for toggles
   try {
-    const resp = await fetch('/api/rpc', {
+    const resp = await fetch(TAU_BASE + 'api/rpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'get_state' }),
@@ -1876,7 +1877,7 @@ if (isMobile()) {
 const launcherEl = document.getElementById('launcher');
 const launcher = new Launcher(launcherEl, async (projectPath) => {
   try {
-    const res = await fetch('/api/projects/launch', {
+    const res = await fetch(TAU_BASE + 'api/projects/launch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: projectPath }),
@@ -1894,7 +1895,7 @@ const launcher = new Launcher(launcherEl, async (projectPath) => {
 // Check if launcher should show (projects configured)
 async function initLauncher() {
   try {
-    const res = await fetch('/api/projects');
+    const res = await fetch(TAU_BASE + 'api/projects');
     const data = await res.json();
     if (data.projects && data.projects.length > 0) {
       launcher.projects = data.projects;
@@ -1956,7 +1957,7 @@ initLauncher();
 
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register(TAU_BASE + 'sw.js').catch(() => {});
 }
 
 // Dismiss mobile splash screen

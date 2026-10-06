@@ -7,6 +7,9 @@ const CACHE_NAME = 'tau-v1';
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
+      // issue 170: precache under the registration scope (the SW is
+      // registered at <base>sw.js, so the scope IS the base path).
+      const base = self.registration.scope;
       return cache.addAll([
         '/',
         '/style.css',
@@ -20,7 +23,7 @@ self.addEventListener('install', (event) => {
         '/session-sidebar.js',
         '/websocket-client.js',
         '/manifest.json',
-      ]);
+      ].map((p) => new URL(p === '/' ? '' : p.slice(1), base).href));
     })
   );
   self.skipWaiting();
@@ -43,7 +46,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
   // Don't cache API/WebSocket requests
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws')) {
+  if (url.pathname.startsWith(self.registration.scope + 'api/') ||
+      url.pathname.startsWith(self.registration.scope + 'ws')) {
     return;
   }
 

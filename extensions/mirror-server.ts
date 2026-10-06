@@ -836,6 +836,20 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    // issue 170: serve the PWA manifest with a start_url under the
+    // /agent/<port>/ base path (TAU_BASE_PATH, set by the pi-agent
+    // launcher when the port is in tau's allocation half; unset at
+    // root, where "/" is correct).
+    if (urlPath === "/manifest.json") {
+      const manifest = JSON.parse(
+        fs.readFileSync(filePath, "utf8")
+      );
+      manifest.start_url = process.env.TAU_BASE_PATH || "/";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(manifest, null, 2));
+      return;
+    }
+
     // Check file exists
     fs.stat(filePath, (err, stats) => {
       if (err || !stats.isFile()) {
