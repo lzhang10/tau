@@ -3493,3 +3493,110 @@ body.hide-thinking .thinking-block { display: none !important; }
 .katex-html {
   white-space: normal;
 }
+
+/* ══ Skill menu (issue 183) — / opens a list of pi's skills ══ */
+
+.skill-menu {
+  position: absolute;
+  bottom: 120px; /* set dynamically by app.js to sit above the input area */
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(800px, calc(100% - 40px));
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-solid);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  box-shadow: var(--shadow-lg);
+  z-index: 1001;
+  animation: dropdownIn 0.15s var(--ease);
+}
+
+.skill-menu.hidden { display: none; }
+
+.skill-menu-item {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.skill-menu-item:hover {
+  background: var(--bg-glass-hover);
+}
+
+.skill-menu-name {
+  font-size: 13px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.skill-menu-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .skill-menu {
+    width: calc(100% - 24px);
+    max-height: 40vh;
+  }
+}
+
+/* ══ Skill chip (issue 183) — compact rendering of a skill invocation ══ */
+
+.skill-chip {
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  padding: 2px 0;
+}
+
+.skill-chip-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 13px;
+}
+
+.skill-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.skill-chip-name {
+  font-weight: 600;
+}
+
+.skill-chip-args {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.skill-chip-full {
+  display: none;
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.skill-chip.expanded .skill-chip-full {
+  display: block;
+}

@@ -3,6 +3,7 @@
  */
 
 import { renderMarkdown, renderUserMarkdown } from './markdown.js';
+import { parseSkillInvocation } from './skill-command.js';
 
 export class MessageRenderer {
   constructor(container) {
@@ -73,14 +74,47 @@ export class MessageRenderer {
         '</div>';
     }
 
+    // issue 183: a /skill:<name> invocation arrives as a user message that
+    // starts with a <skill name="..."> block — render it as a compact chip
+    // with the full expanded text available on click.
+    const skill = parseSkillInvocation(message.content);
+    const contentHtml = skill
+      ? this.renderSkillChip(skill, message.content)
+      : renderUserMarkdown(message.content);
+
     div.innerHTML = `
-      <div class="message-content">${imagesHtml}${renderUserMarkdown(message.content)}</div>
+      <div class="message-content">${imagesHtml}${contentHtml}</div>
       <button class="message-copy-btn" aria-label="Copy message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
     `;
     this._setupCopyBtn(div);
+    if (skill) this._setupSkillChip(div);
     this.container.appendChild(div);
     this._renderMath(div);
     if (!isHistory) this.scrollToBottom();
+  }
+
+  /**
+   * Compact chip for a skill invocation (issue 183). Shows the skill name
+   * plus any args; the full expanded text is hidden until expanded.
+   */
+  renderSkillChip(skill, fullText) {
+    const argsHtml = skill.args
+      ? `<span class="skill-chip-args">${this.escapeHtml(skill.args)}</span>`
+      : '';
+    return `<div class="skill-chip" title="Click to expand">
+      <span class="skill-chip-head">
+        <span class="skill-chip-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+        <span class="skill-chip-name">${this.escapeHtml(skill.name)}</span>
+        ${argsHtml}
+      </span>
+      <pre class="skill-chip-full">${this.escapeHtml(fullText)}</pre>
+    </div>`;
+  }
+
+  _setupSkillChip(messageEl) {
+    const chip = messageEl.querySelector('.skill-chip');
+    if (!chip) return;
+    chip.addEventListener('click', () => chip.classList.toggle('expanded'));
   }
 
   renderAssistantMessage(message, isStreaming = false, isHistory = false) {

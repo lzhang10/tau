@@ -507,13 +507,16 @@ export default function (pi: ExtensionAPI) {
     try {
       switch (command.type) {
         // ─── Prompting ───
+        // issue 183: expandPromptTemplates routes /-prefixed input through
+        // pi's dispatcher (skills, prompt templates, extension commands);
+        // plain text is unaffected by the flag.
         case "prompt": {
           if (ctx && !ctx.isIdle()) {
             const behavior = command.streamingBehavior || "steer";
             if (behavior === "steer") {
-              pi.sendUserMessage(command.message, { deliverAs: "steer" });
+              pi.sendUserMessage(command.message, { deliverAs: "steer", expandPromptTemplates: true });
             } else {
-              pi.sendUserMessage(command.message, { deliverAs: "followUp" });
+              pi.sendUserMessage(command.message, { deliverAs: "followUp", expandPromptTemplates: true });
             }
           } else {
             // Build content with optional images
@@ -544,12 +547,12 @@ export default function (pi: ExtensionAPI) {
               // Only send content array if we actually have images, otherwise just text
               const hasImages = content.some((c: any) => c.type === "image");
               if (hasImages) {
-                pi.sendUserMessage(content);
+                pi.sendUserMessage(content, { expandPromptTemplates: true });
               } else {
-                pi.sendUserMessage(command.message);
+                pi.sendUserMessage(command.message, { expandPromptTemplates: true });
               }
             } else {
-              pi.sendUserMessage(command.message);
+              pi.sendUserMessage(command.message, { expandPromptTemplates: true });
             }
           }
           sendTo(ws, success("prompt"));
@@ -765,6 +768,14 @@ export default function (pi: ExtensionAPI) {
         }
 
         // ─── Commands & Files ───
+        case "get_commands": {
+          // issue 183: pi's command registry — extension commands, prompt
+          // templates, and skills. The browser filters to source: "skill".
+          const commands = pi.getCommands();
+          sendTo(ws, success("get_commands", { commands }));
+          break;
+        }
+
         // ─── Sync ───
         case "mirror_sync_request": {
           if (ctx) {

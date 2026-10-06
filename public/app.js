@@ -12,6 +12,7 @@ import { SessionSidebar } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
 import { FileBrowser, getFileIcon } from './file-browser.js';
 import { Launcher } from './launcher.js';
+import { filterSkills } from './skill-command.js';
 
 
 // Initialize components
@@ -464,7 +465,111 @@ chatForm.addEventListener('submit', (e) => {
   sendMessage();
 });
 
+// ═════════════════════════════════════
+// Skill menu (issue 183) — "/" opens a menu of pi's skills
+//
+// The list comes from pi's command registry via the get_commands RPC,
+// filtered to source: "skill". The menu is active only while the input is a
+// single "/"-token: a space marks the start of skill args and closes it.
+// ════════════════════════════════════
+
+const skillMenu = document.getElementById('skill-menu');
+let skillMenuOpen = false;
+let skillCommands = [];   // last command list fetched from pi
+let skillMenuSeq = 0;     // guards against stale get_commands responses
+
+function skillMenuQuery(value) {
+  if (!value.startsWith('/') || /\s/.test(value)) return null;
+  return value.slice(1);
+}
+
+function positionSkillMenu() {
+  const inputArea = document.querySelector('.input-area');
+  if (inputArea) skillMenu.style.bottom = (inputArea.offsetHeight + 8) + 'px';
+}
+
+async function openSkillMenu() {
+  skillMenuOpen = true;
+  positionSkillMenu();
+  const seq = ++skillMenuSeq;
+  renderSkillMenu();
+  // Refresh on every open: skills added by /reload appear without a page reload
+  try {
+    const resp = await fetch(TAU_BASE + 'api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'get_commands' }),
+    });
+    const data = await resp.json();
+    if (seq !== skillMenuSeq) return; // stale response
+    skillCommands = data.success ? (data.data?.commands || []) : [];
+    renderSkillMenu();
+  } catch (e) {
+    if (seq === skillMenuSeq) console.warn('[App] get_commands failed:', e);
+  }
+}
+
+function closeSkillMenu() {
+  skillMenuOpen = false;
+  skillMenuSeq++;
+  skillMenu.classList.add('hidden');
+  skillMenu.innerHTML = '';
+}
+
+function renderSkillMenu() {
+  if (!skillMenuOpen) return;
+  const q = skillMenuQuery(messageInput.value);
+  if (q === null) {
+    closeSkillMenu();
+    return;
+  }
+  const skills = filterSkills(skillCommands, q);
+  skillMenu.innerHTML = '';
+  for (const cmd of skills) {
+    const el = document.createElement('div');
+    el.className = 'skill-menu-item';
+    el.dataset.name = cmd.name;
+    const name = document.createElement('div');
+    name.className = 'skill-menu-name';
+    name.textContent = '/' + cmd.name;
+    const desc = document.createElement('div');
+    desc.className = 'skill-menu-desc';
+    desc.textContent = cmd.description || '';
+    el.appendChild(name);
+    el.appendChild(desc);
+    el.addEventListener('click', () => completeSkillCommand(cmd.name));
+    skillMenu.appendChild(el);
+  }
+  skillMenu.classList.toggle('hidden', skills.length === 0);
+}
+
+// Complete the selected skill name into the input. The trailing space
+// leaves room for args.
+function completeSkillCommand(commandName) {
+  messageInput.value = '/' + commandName + ' ';
+  messageInput.dispatchEvent(new Event('input'));
+  closeSkillMenu();
+  messageInput.focus();
+}
+
 messageInput.addEventListener('keydown', (e) => {
+  if (skillMenuOpen) {
+    if (e.key === 'Escape') {
+      // Close the menu without triggering the global Escape (abort) handler
+      e.preventDefault();
+      e.stopPropagation();
+      closeSkillMenu();
+      return;
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
+      const first = skillMenu.querySelector('.skill-menu-item');
+      if (first) {
+        e.preventDefault();
+        completeSkillCommand(first.dataset.name);
+        return;
+      }
+    }
+  }
   // Enter sends, Shift+Enter inserts newline
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -472,10 +577,27 @@ messageInput.addEventListener('keydown', (e) => {
   }
 });
 
-// Auto-resize textarea
+// Auto-resize textarea + skill menu
 messageInput.addEventListener('input', () => {
   messageInput.style.height = 'auto';
   messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
+
+  const q = skillMenuQuery(messageInput.value);
+  if (q !== null) {
+    if (!skillMenuOpen) openSkillMenu();
+    else renderSkillMenu();
+  } else {
+    closeSkillMenu();
+  }
+});
+
+// Click-away closes the skill menu
+document.addEventListener('click', (e) => {
+  if (skillMenuOpen && !skillMenu.contains(e.target)) closeSkillMenu();
+});
+
+window.addEventListener('resize', () => {
+  if (skillMenuOpen) positionSkillMenu();
 });
 
 // ═══════════════════════════════════════
