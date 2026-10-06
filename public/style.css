@@ -1098,6 +1098,8 @@ body {
 /* Model dropdown */
 .model-dropdown {
   position: relative;
+  flex: 0 1 auto;
+  min-width: 140px;
 }
 
 .model-dropdown-btn {
@@ -1114,7 +1116,14 @@ body {
   cursor: pointer;
   transition: all var(--duration) var(--ease);
   white-space: nowrap;
-  max-width: 200px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.model-dropdown-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .model-dropdown-btn:hover {
