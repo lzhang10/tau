@@ -6,7 +6,8 @@
  * pi expands `/skill:<name> [args]` into a user message that starts with a
  * `<skill name="..." location="...">` block (pi's _expandSkillCommand).
  * parseSkillInvocation reverses that expansion for chip rendering;
- * filterSkills backs the `/` skill menu.
+ * skillChipLabel builds the chip head label; filterSkills backs the `/`
+ * skill menu.
  */
 
 // Head of a pi skill expansion: <skill name="<name>" ...>
@@ -27,6 +28,17 @@ export function parseSkillInvocation(text) {
   const close = text.indexOf('</skill>');
   const after = close === -1 ? '' : text.slice(close + '</skill>'.length);
   return { name: match[1], args: after.trim() };
+}
+
+/**
+ * Label for the compact skill chip head: a short "SKILL: <name>"
+ * pill. The full expanded text stays available via the chip's expand.
+ *
+ * @param {string} name the skill name
+ * @returns {string} the chip label
+ */
+export function skillChipLabel(name) {
+  return 'SKILL: ' + name;
 }
 
 /**

@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSkillInvocation, filterSkills } from '../public/skill-command.js';
+import { parseSkillInvocation, filterSkills, skillChipLabel } from '../public/skill-command.js';
 
 // The exact shape pi's _expandSkillCommand produces:
 //   `<skill name="<n>" location="<f>">\nReferences are relative to <d>.\n\n<body>\n</skill>`
@@ -76,4 +76,9 @@ test('filterSkills returns no skills for a non-skill query', () => {
 
 test('filterSkills tolerates null input', () => {
   assert.deepEqual(filterSkills(null, 'x'), []);
+});
+
+test('skillChipLabel returns the SKILL: name label', () => {
+  assert.equal(skillChipLabel('code-review'), 'SKILL: code-review');
+  assert.equal(skillChipLabel('ask-matt'), 'SKILL: ask-matt');
 });

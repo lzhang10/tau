@@ -3496,12 +3496,11 @@ body.hide-thinking .thinking-block { display: none !important; }
 
 /* ══ Skill menu (issue 183) — / opens a list of pi's skills ══ */
 
+/* Anchored by app.js: left/width/bottom track the chat form so
+   the menu sits directly above the input bar, aligned to its left edge. */
 .skill-menu {
   position: absolute;
-  bottom: 120px; /* set dynamically by app.js to sit above the input area */
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(800px, calc(100% - 40px));
+  bottom: 120px; /* fallback; app.js sets left/width/bottom dynamically */
   max-height: 300px;
   overflow-y: auto;
   background: var(--bg-solid);
@@ -3541,13 +3540,6 @@ body.hide-thinking .thinking-block { display: none !important; }
   white-space: nowrap;
 }
 
-@media (max-width: 768px) {
-  .skill-menu {
-    width: calc(100% - 24px);
-    max-height: 40vh;
-  }
-}
-
 /* ══ Skill chip (issue 183) — compact rendering of a skill invocation ══ */
 
 .skill-chip {
@@ -3573,11 +3565,6 @@ body.hide-thinking .thinking-block { display: none !important; }
 
 .skill-chip-name {
   font-weight: 600;
-}
-
-.skill-chip-args {
-  color: var(--text-dim);
-  font-weight: 400;
 }
 
 .skill-chip-full {

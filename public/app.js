@@ -484,8 +484,17 @@ function skillMenuQuery(value) {
 }
 
 function positionSkillMenu() {
-  const inputArea = document.querySelector('.input-area');
-  if (inputArea) skillMenu.style.bottom = (inputArea.offsetHeight + 8) + 'px';
+  // Anchor the menu to the chat form: left-aligned with the form,
+  // form-wide, top edge 8px above the form. Offsets are relative to .main,
+  // the menu's positioned containing block.
+  const form = document.getElementById('chat-form');
+  const main = document.querySelector('.main');
+  if (!form || !main) return;
+  const f = form.getBoundingClientRect();
+  const m = main.getBoundingClientRect();
+  skillMenu.style.left = (f.left - m.left) + 'px';
+  skillMenu.style.width = f.width + 'px';
+  skillMenu.style.bottom = (m.bottom - f.top + 8) + 'px';
 }
 
 async function openSkillMenu() {
@@ -586,6 +595,7 @@ messageInput.addEventListener('input', () => {
   if (q !== null) {
     if (!skillMenuOpen) openSkillMenu();
     else renderSkillMenu();
+    positionSkillMenu(); // textarea auto-resize moves the form's top edge
   } else {
     closeSkillMenu();
   }

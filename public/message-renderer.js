@@ -3,7 +3,7 @@
  */
 
 import { renderMarkdown, renderUserMarkdown } from './markdown.js';
-import { parseSkillInvocation } from './skill-command.js';
+import { parseSkillInvocation, skillChipLabel } from './skill-command.js';
 
 export class MessageRenderer {
   constructor(container) {
@@ -94,18 +94,15 @@ export class MessageRenderer {
   }
 
   /**
-   * Compact chip for a skill invocation (issue 183). Shows the skill name
-   * plus any args; the full expanded text is hidden until expanded.
+   * Compact chip for a skill invocation (issue 183). The head shows a
+   * short "SKILL: <name>" label; the full expanded text is hidden until
+   * expanded.
    */
   renderSkillChip(skill, fullText) {
-    const argsHtml = skill.args
-      ? `<span class="skill-chip-args">${this.escapeHtml(skill.args)}</span>`
-      : '';
     return `<div class="skill-chip" title="Click to expand">
       <span class="skill-chip-head">
         <span class="skill-chip-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
-        <span class="skill-chip-name">${this.escapeHtml(skill.name)}</span>
-        ${argsHtml}
+        <span class="skill-chip-name">${this.escapeHtml(skillChipLabel(skill.name))}</span>
       </span>
       <pre class="skill-chip-full">${this.escapeHtml(fullText)}</pre>
     </div>`;
