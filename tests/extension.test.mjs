@@ -81,6 +81,7 @@ function makeMockCtx() {
     sessionManager: {
       getSessionFile: () => path.join(tmpHome, 'test-session.jsonl'),
       getEntries: () => [],
+      getBranch: () => [],
     },
     getContextUsage: () => null,
     ui: { setStatus: () => {}, notify: () => {} },

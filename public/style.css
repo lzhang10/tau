@@ -2965,6 +2965,89 @@ body.hide-thinking .thinking-block { display: none !important; }
   font-size: 12px;
 }
 
+/* ═══════════════════════════════════════════════════
+   Tree action buttons on user turns
+   Visible on hover (desktop) and always on touch devices.
+   Disabled while the agent streams.
+   ═══════════════════════════════════════════════════ */
+
+.message-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-self: flex-start;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+  flex-shrink: 0;
+}
+
+.message.user:hover .message-actions { opacity: 1; }
+
+@media (hover: none) {
+  .message-actions { opacity: 1; }
+}
+
+.message-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: color 0.15s var(--ease);
+}
+
+.message-action-btn:hover { color: var(--text-primary); }
+.message-action-btn:active { transform: scale(0.95); }
+
+.message-action-btn:disabled,
+body.agent-streaming .message-action-btn {
+  opacity: 0.35;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════════════
+   Notice toast (tree command outcomes)
+   ═══════════════════════════════════════════════════ */
+
+.notice-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(80%, 480px);
+  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  animation: toastIn 0.2s var(--ease);
+  text-align: center;
+}
+
+.notice-toast.hidden { display: none; }
+
+.notice-toast.notice-info {
+  background: var(--bg-frosted);
+  color: var(--text-primary);
+  border: 1px solid var(--border-hover);
+}
+
+.notice-toast.notice-error {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--error);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* Error / system messages */
 .error-message {
   background: rgba(248, 113, 113, 0.06);

@@ -174,6 +174,19 @@ scrollBottomBtn.addEventListener('click', () => {
   hasNewWhileScrolled = false;
 });
 
+// Tree management buttons on user turns.
+// Re-ask / Edit / Fork — send the WS command with the entry id.
+messagesContainer.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('.message-action-btn');
+  if (!btn || btn.disabled) return;
+  const msgEl = btn.closest('.message.user');
+  const entryId = msgEl?.dataset?.messageId;
+  if (!entryId) return;
+  const action = btn.dataset.action;
+  const wsType = action === 're-ask' ? 're_ask' : action;
+  wsClient.send({ type: wsType, entryId });
+});
+
 function showNewMessageBadge() {
   if (isScrolledUp) {
     hasNewWhileScrolled = true;
@@ -212,6 +225,35 @@ wsClient.addEventListener('serverError', (e) => {
 // Mirror mode: receive full state snapshot on connect
 wsClient.addEventListener('mirrorSync', (e) => {
   handleMirrorSync(e.detail);
+});
+
+// Edit: load the original prompt into the composer
+wsClient.addEventListener('composerPrefill', (e) => {
+  const text = e.detail?.text;
+  if (typeof text !== 'string') return;
+  messageInput.value = text;
+  messageInput.dispatchEvent(new Event('input'));
+  messageInput.focus();
+});
+
+// Notice toast for tree command outcomes
+const noticeToast = document.getElementById('notice-toast');
+let noticeTimer = null;
+
+function showNotice(level, text) {
+  if (!noticeToast || !text) return;
+  noticeToast.textContent = text;
+  noticeToast.className = `notice-toast ${level === 'error' ? 'notice-error' : 'notice-info'}`;
+  if (noticeTimer) clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    noticeToast.classList.add('hidden');
+    noticeTimer = null;
+  }, 4000);
+}
+
+wsClient.addEventListener('notice', (e) => {
+  const { level, text } = e.detail || {};
+  showNotice(level, text);
 });
 
 // ═══════════════════════════════════════
@@ -263,6 +305,12 @@ function handleRPCEvent(event) {
         if (activeItem) activeItem.textContent = event.name;
       }
       break;
+    case 'session_start':
+      // Forked or new session — refresh the sidebar list.
+      sidebar.loadSessions().then(() => {
+        if (isMirrorMode) updateMirrorLiveIndicator();
+      });
+      break;
   }
 }
 
@@ -300,6 +348,12 @@ function handleAgentEnd() {
   currentStreamingElement = null;
   currentStreamingText = '';
   updateUI();
+
+  // Re-fetch the active branch so live-rendered messages pick up their
+  // session entry ids — the tree action buttons need them.
+  if (isMirrorMode && viewingActiveSession) {
+    wsClient.send({ type: 'mirror_sync_request' });
+  }
 
   // Notify via tab title if unfocused
   if (!hasFocus) {
@@ -1270,6 +1324,34 @@ async function handleSessionSelect(session, project) {
   }
 }
 
+// A session file is one session. Re-ask and edit add branches
+// to the same file; only fork creates a new file. The display shows the
+// active branch: the path from the root to the last written entry.
+function activeBranch(entries) {
+  if (!entries || entries.length === 0) return entries || [];
+  const byId = new Map();
+  for (const e of entries) {
+    if (e.id) byId.set(e.id, e);
+  }
+  const hasChild = new Set();
+  for (const e of entries) {
+    if (e.parentId) hasChild.add(e.parentId);
+  }
+  let leaf = null;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (!hasChild.has(entries[i].id)) { leaf = entries[i]; break; }
+  }
+  if (!leaf) return entries;
+  const branch = [];
+  let cur = leaf;
+  while (cur) {
+    branch.push(cur);
+    cur = cur.parentId ? byId.get(cur.parentId) : null;
+  }
+  branch.reverse();
+  return branch;
+}
+
 async function switchSession(sessionFile, session = null, project = null) {
   try {
     // Clear any streaming state from previous session to prevent bleed
@@ -1296,7 +1378,7 @@ async function switchSession(sessionFile, session = null, project = null) {
           console.log('[App] History entries:', data.entries?.length || 0);
 
           messageRenderer.clear();
-          renderSessionHistory(data.entries || []);
+          renderSessionHistory(activeBranch(data.entries || []));
         } catch (e) {
           console.error('[App] History fetch error:', e);
         }
@@ -1360,10 +1442,18 @@ function handleMirrorSync(data) {
   isMirrorMode = true;
 
   // Track the active session
-  mirrorActiveSessionFile = data.sessionFile || null;
+  const newSessionFile = data.sessionFile || null;
+  const sessionChanged = newSessionFile !== mirrorActiveSessionFile;
+  mirrorActiveSessionFile = newSessionFile;
   viewingActiveSession = true;
   updateMirrorInputState();
   updateMirrorLiveIndicator();
+
+  // Fork / session switch: the session_start event can arrive
+  // while the socket is down, so refresh the sidebar from the snapshot.
+  if (sessionChanged) {
+    sidebar.loadSessions().then(() => updateMirrorLiveIndicator());
+  }
 
   // Update model display
   if (data.model) {
@@ -1468,7 +1558,7 @@ function renderSessionHistory(entries) {
         : [];
       if (content || images.length > 0) {
         userCount++;
-        messageRenderer.renderUserMessage({ content: content || '', images: images.length > 0 ? images : undefined }, true);
+        messageRenderer.renderUserMessage({ id: entry.id, content: content || '', images: images.length > 0 ? images : undefined }, true);
       }
     } else if (msg.role === 'assistant') {
       const textBlocks = (msg.content || []).filter((b) => b.type === 'text');
@@ -1489,6 +1579,7 @@ function renderSessionHistory(entries) {
         assistantCount++;
         messageRenderer.renderAssistantMessage(
           {
+            id: entry.id,
             content: contentBlocks.length > 0 ? contentBlocks : text,
             usage: msg.usage,
           },
@@ -1648,6 +1739,9 @@ function updateUI() {
     statusIndicator.classList.add('connected');
     statusText.textContent = 'Connected';
   }
+
+  // Disable tree action buttons while the agent runs
+  document.body.classList.toggle('agent-streaming', isStreaming);
 
   messageInput.disabled = false;
   sendBtn.disabled = false;

@@ -335,7 +335,88 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ═══════════════════════════════════════
+
+
+  // ════════════════════════════════════════════════════
+  // /tau-tree — hidden tree management command
+  // Dispatched by the WS handler via pi.sendUserMessage so the pi
+  // dispatcher runs it without adding a user entry to the session.
+  // Actions: re-ask <entryId>, edit <entryId>, fork <entryId>
+  // ═══════════════════════════════════════════════════
+  function broadcastNotice(level: string, text: string) {
+    broadcast({ type: "notice", level, text });
+  }
+
+  function extractUserText(entry: any): string {
+    if (entry?.type !== "message") return "";
+    const content = entry.message?.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    }
+    return "";
+  }
+
+  pi.registerCommand("tau-tree", {
+    description: "Branch session history: re-ask, edit, fork (hidden — dispatched by the Tau mirror)",
+    handler: async (args, ctx) => {
+      const [action, entryId] = args.trim().split(/\s+/);
+      try {
+        if (!entryId) throw new Error("Missing entryId");
+
+        switch (action) {
+          case "re-ask": {
+            await ctx.waitForIdle();
+            const nav = await ctx.navigateTree(entryId);
+            if (nav.cancelled) {
+              broadcastNotice("error", "Re-ask cancelled");
+              return;
+            }
+            const entry = ctx.sessionManager.getEntry(entryId);
+            const msg = entry?.type === "message" ? entry.message : undefined;
+            const content = (msg as any)?.role === "user" ? (msg as any).content : undefined;
+            if (content === undefined || content === "" || (Array.isArray(content) && content.length === 0)) {
+              throw new Error("Re-ask failed: message content is empty");
+            }
+            pi.sendUserMessage(content, { expandPromptTemplates: true });
+            broadcastNotice("info", "Re-ask: message re-sent on a new branch");
+            break;
+          }
+          case "edit": {
+            await ctx.waitForIdle();
+            const nav = await ctx.navigateTree(entryId);
+            if (nav.cancelled) {
+              broadcastNotice("error", "Edit cancelled");
+              return;
+            }
+            const entry = ctx.sessionManager.getEntry(entryId);
+            const text = extractUserText(entry);
+            if (!text) {
+              throw new Error("Edit failed: message has no text content");
+            }
+            broadcast({ type: "composer_prefill", text });
+            broadcastNotice("info", "Edit: message loaded into composer");
+            break;
+          }
+          case "fork": {
+            await ctx.waitForIdle();
+            const result = await ctx.fork(entryId, { position: "at" });
+            if (result.cancelled) {
+              broadcastNotice("error", "Fork cancelled");
+              return;
+            }
+            broadcastNotice("info", "Fork: new session created");
+            break;
+          }
+          default:
+            throw new Error(`Unknown action: ${action}`);
+        }
+      } catch (e: any) {
+        broadcastNotice("error", `tau-tree ${action || ""}: ${e?.message || e}`.trim());
+      }
+    },
+  });
+
   // Event forwarding — subscribe to all Pi events
   // ═══════════════════════════════════════
   const eventTypes = [
@@ -346,6 +427,7 @@ export default function (pi: ExtensionAPI) {
     "auto_compaction_start", "auto_compaction_end",
     "auto_retry_start", "auto_retry_end",
     "model_select",
+    "session_start",
   ] as const;
 
   for (const eventType of eventTypes) {
@@ -371,6 +453,19 @@ export default function (pi: ExtensionAPI) {
     userMessages = [];
     // Update instance registry with new session file
     updateInstanceSession(ctx.sessionManager.getSessionFile() || "");
+    // Full state snapshot for forked/new sessions.
+    // Clients re-render and refresh the sidebar session list.
+    buildStateSnapshot(ctx).then((snapshot) => {
+      broadcast(snapshot);
+    });
+  });
+
+  // Tree navigation (Re-ask / Edit) moves the active leaf.
+  // Push the active branch to all clients so the browser stays in sync.
+  pi.on("session_tree", async (_event, ctx) => {
+    latestCtx = ctx;
+    const snapshot = await buildStateSnapshot(ctx);
+    broadcast(snapshot);
   });
 
   pi.on("turn_start", async (_event, _ctx) => {
@@ -387,7 +482,7 @@ export default function (pi: ExtensionAPI) {
     if (typeof content === "string") text = content;
     else if (Array.isArray(content)) {
       const tb = content.find((b: any) => b.type === "text");
-      if (tb) text = tb.text;
+      if (tb) text = (tb as any).text;
     }
     if (text) userMessages.push(text.substring(0, 300));
   });
@@ -463,8 +558,9 @@ export default function (pi: ExtensionAPI) {
   // Build state snapshot for new connections
   // ═══════════════════════════════════════
   async function buildStateSnapshot(ctx: ExtensionContext) {
-    // Get session entries for message history
-    const entries = ctx.sessionManager.getEntries();
+    // Get the active branch for message history.
+    // getEntries() would include abandoned branches from tree navigation.
+    const entries = ctx.sessionManager.getBranch();
 
     // Get model info
     const model = ctx.model;
@@ -601,7 +697,8 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("get_messages", "No context available"));
             break;
           }
-          const entries = ctx.sessionManager.getEntries();
+          // Active branch only — abandoned branches stay out of the display.
+          const entries = ctx.sessionManager.getBranch();
           sendTo(ws, success("get_messages", { entries }));
           break;
         }
@@ -802,6 +899,42 @@ export default function (pi: ExtensionAPI) {
           saveTauSetting("authEnabled", authEnabled);
           broadcast({ type: "event", event: { type: "auth_changed", enabled: authEnabled } });
           sendTo(ws, success("set_auth", { enabled: authEnabled }));
+          break;
+        }
+
+        // ─── Tree management ───
+        // re_ask / edit / fork: guard, then dispatch the hidden /tau-tree
+        // command through the pi dispatcher. The command handler performs
+        // the operation and broadcasts the outcome (notice / composer_prefill).
+        case "re_ask":
+        case "edit":
+        case "fork": {
+          const action = command.type === "re_ask" ? "re-ask" : command.type;
+          if (!ctx) {
+            sendTo(ws, error(command.type, "No context available"));
+            break;
+          }
+          if (!ctx.isIdle()) {
+            sendTo(ws, error(command.type, "Agent is running. Wait for it to finish."));
+            break;
+          }
+          const entryId = command.entryId;
+          if (!entryId || typeof entryId !== "string") {
+            sendTo(ws, error(command.type, "entryId is required"));
+            break;
+          }
+          const entry = ctx.sessionManager.getEntry(entryId);
+          if (!entry) {
+            sendTo(ws, error(command.type, `Entry not found: ${entryId}`));
+            break;
+          }
+          if (entry.type !== "message" || entry.message?.role !== "user") {
+            sendTo(ws, error(command.type, "Entry is not a user message"));
+            break;
+          }
+          // Dispatch is fire-and-forget; the handler broadcasts the outcome.
+          sendTo(ws, success(command.type, { dispatched: true }));
+          pi.sendUserMessage(`/tau-tree ${action} ${entryId}`, { expandPromptTemplates: true });
           break;
         }
 
@@ -1023,7 +1156,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
           try {
             const entries = latestCtx.sessionManager.getEntries();
             const sessionEntry = entries.find((e: any) => e.type === "session");
-            if (sessionEntry?.cwd) dirPath = sessionEntry.cwd;
+            if ((sessionEntry as any)?.cwd) dirPath = (sessionEntry as any).cwd;
           } catch {}
         }
         serveFileList(res, dirPath);
@@ -1253,6 +1386,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
 
       const tmuxFiles = getTmuxSessionFiles();
       const readline = await import("node:readline");
+      const activeFile = latestCtx?.sessionManager?.getSessionFile?.() || "";
       const dirEntries = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true });
       const projects: any[] = [];
 
@@ -1268,7 +1402,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
         for (const file of files) {
           try {
             const filePath = path.join(projectDir, file);
-            const parsed = await parseSessionFile(filePath, readline);
+            const parsed = await parseSessionFile(filePath, readline, filePath === activeFile);
             if (parsed) {
               const stat = fs.statSync(filePath);
               const isTmux = tmuxFiles.has(filePath);
@@ -1342,7 +1476,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
   // ═══════════════════════════════════════
   // Parse session file header
   // ═══════════════════════════════════════
-  async function parseSessionFile(filePath: string, readline: any) {
+  async function parseSessionFile(filePath: string, readline: any, includePipe = false) {
     const stream = fs.createReadStream(filePath, { encoding: "utf8" });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
@@ -1380,7 +1514,9 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
     stream.destroy();
 
     if (!header?.id) return null;
-    if (userMessageCount <= 1 && lineCount <= 8) return null; // pipe mode
+    // Pipe mode: one-shot invocations. A freshly forked session looks
+    // identical, so the active session file is always included.
+    if (userMessageCount <= 1 && lineCount <= 8 && !includePipe) return null;
 
     return {
       id: header.id,

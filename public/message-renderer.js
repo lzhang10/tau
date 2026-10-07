@@ -63,6 +63,9 @@ export class MessageRenderer {
 
     const div = document.createElement('div');
     div.className = `message user${isHistory ? ' history' : ''}`;
+    // Entry id from the session file — required by the tree action buttons.
+    // Live-rendered messages (no id yet) get their id after the next mirror sync.
+    div.dataset.messageId = message.id || '';
 
     let imagesHtml = '';
     if (message.images && message.images.length > 0) {
@@ -82,8 +85,14 @@ export class MessageRenderer {
       ? this.renderSkillChip(skill, message.content)
       : renderUserMarkdown(message.content);
 
+    const actionsDisabled = message.id ? '' : ' disabled';
     div.innerHTML = `
       <div class="message-content">${imagesHtml}${contentHtml}</div>
+      <div class="message-actions">
+        <button class="message-action-btn" data-action="re-ask" title="Re-ask: branch here and resend this message"${actionsDisabled}>Re-ask</button>
+        <button class="message-action-btn" data-action="edit" title="Edit: branch here and load this message into the composer"${actionsDisabled}>Edit</button>
+        <button class="message-action-btn" data-action="fork" title="Fork: create a new session from this message"${actionsDisabled}>Fork</button>
+      </div>
       <button class="message-copy-btn" aria-label="Copy message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
     `;
     this._setupCopyBtn(div);

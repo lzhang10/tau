@@ -136,6 +136,12 @@ export class WebSocketClient extends EventTarget {
       case 'mirror_sync':
         this.dispatchEvent(new CustomEvent('mirrorSync', { detail: message }));
         break;
+      case 'composer_prefill':
+        this.dispatchEvent(new CustomEvent('composerPrefill', { detail: message }));
+        break;
+      case 'notice':
+        this.dispatchEvent(new CustomEvent('notice', { detail: message }));
+        break;
       default:
         console.warn('[WS] Unknown message type:', message.type);
     }
