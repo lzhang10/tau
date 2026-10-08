@@ -1,5 +1,5 @@
 /**
- * Extension WebSocket protocol test (issue 183).
+ * Extension WebSocket protocol test.
  *
  * Drives the mirror-server extension through its real WebSocket server with
  * a mocked ExtensionAPI (pi). This is the single test seam for command
@@ -10,8 +10,16 @@
  *     expandPromptTemplates true
  *   - a plain prompt reaches pi.sendUserMessage unexpanded
  *   - get_commands returns pi's command list
+ *   - a valid edit responds success and the handler branches before sending
+ *     the stashed text
+ *   - the dispatched command line carries the entry id, never the text
+ *   - a busy agent is rejected without dispatch
+ *   - a missing entry is rejected
+ *   - a non-user entry is rejected
+ *   - a cancelled navigation discards the stash and broadcasts an error notice
+ *   - an unchanged-text edit resends the original content
  */
-import { test, before, after } from 'node:test';
+import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import net from 'node:net';
@@ -48,13 +56,63 @@ const jiti = require('jiti')(import.meta.url);
 const extension = jiti(new URL('../extensions/mirror-server.ts', import.meta.url).pathname).default;
 
 // ── Mocks ──
+//
+// The mock pi records every call in a shared `events` log, in order. When
+// sendUserMessage is called with a registered hidden command (e.g.
+// "/tau-tree edit <id>"), the mock dispatches it to the registered handler
+// with the mock ctx — emulating the pi dispatcher — so the test can observe
+// the full command flow (branch, then send) through the same seam the browser
+// uses.
 
-function makeMockPi() {
-  const calls = { sendUserMessage: [] };
+function makeMocks() {
+  const events = [];
+  const commands = {};
   const handlers = {};
+
+  const ctx = {
+    // Test knobs (reset per test in beforeEach)
+    _idle: true,
+    _entries: [],
+    _navResult: undefined,
+    _forkResult: undefined,
+    isIdle: () => ctx._idle,
+    waitForIdle: async () => {},
+    navigateTree: async (entryId) => {
+      events.push({ type: 'navigateTree', entryId });
+      return ctx._navResult ?? { cancelled: false };
+    },
+    fork: async (entryId, opts) => {
+      events.push({ type: 'fork', entryId, opts });
+      return ctx._forkResult ?? { cancelled: false };
+    },
+    model: { id: 'test-model', provider: 'test-provider' },
+    modelRegistry: { getAvailable: async () => [] },
+    sessionManager: {
+      getSessionFile: () => path.join(tmpHome, 'test-session.jsonl'),
+      getEntries: () => ctx._entries,
+      getBranch: () => ctx._entries,
+      getEntry: (id) => ctx._entries.find((e) => e.id === id),
+    },
+    getContextUsage: () => null,
+    ui: { setStatus: () => {}, notify: () => {} },
+    cwd: tmpHome,
+    abort: () => {},
+    compact: () => {},
+  };
+
   const pi = {
     sendUserMessage: (message, options) => {
-      calls.sendUserMessage.push({ message, options });
+      events.push({ type: 'sendUserMessage', message, options });
+      // Emulate the pi dispatcher for registered hidden commands.
+      const m = /^\/([a-zA-Z0-9-]+)(?:\s+(.*))?$/.exec(message);
+      if (m && commands[m[1]]) {
+        const name = m[1];
+        const argStr = m[2] ?? '';
+        // Fire-and-forget, like the real dispatcher.
+        Promise.resolve(commands[name].handler(argStr, ctx)).catch((e) => {
+          events.push({ type: 'commandError', name, error: e?.message || String(e) });
+        });
+      }
     },
     getCommands: () => [
       { name: 'taustop', description: 'Stop the Tau mirror server', source: 'extension', sourceInfo: null },
@@ -65,30 +123,26 @@ function makeMockPi() {
     getThinkingLevel: () => 'off',
     getSessionName: () => 'Test Session',
     setSessionName: () => {},
-    registerCommand: () => {},
+    registerCommand: (name, def) => {
+      commands[name] = def;
+    },
     on: (type, handler) => {
       (handlers[type] = handlers[type] || []).push(handler);
     },
   };
-  return { pi, calls, handlers };
+
+  return { pi, ctx, events, commands, handlers };
 }
 
-function makeMockCtx() {
-  return {
-    isIdle: () => true,
-    model: { id: 'test-model', provider: 'test-provider' },
-    modelRegistry: { getAvailable: async () => [] },
-    sessionManager: {
-      getSessionFile: () => path.join(tmpHome, 'test-session.jsonl'),
-      getEntries: () => [],
-      getBranch: () => [],
-    },
-    getContextUsage: () => null,
-    ui: { setStatus: () => {}, notify: () => {} },
-    cwd: tmpHome,
-    abort: () => {},
-    compact: () => {},
-  };
+function waitFor(pred, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function poll() {
+      if (pred()) return resolve();
+      if (Date.now() - start > timeout) return reject(new Error('timeout waiting for condition'));
+      setTimeout(poll, 10);
+    })();
+  });
 }
 
 function waitForServer(port) {
@@ -111,19 +165,21 @@ function waitForServer(port) {
 // ── Setup / teardown ──
 
 let ws;
-let calls;
-let handlers;
+let events;
+let broadcasts;
 let ctx;
+let handlers;
 
 before(async () => {
-  const mock = makeMockPi();
-  calls = mock.calls;
+  const mock = makeMocks();
+  events = mock.events;
+  ctx = mock.ctx;
   handlers = mock.handlers;
-  ctx = makeMockCtx();
 
   extension(mock.pi);
 
-  // Fire the session_start handlers (title reset + auto-start)
+  // Fire the session_start handlers (title reset + auto-start). This also
+  // pins latestCtx to the mock ctx, which the WS handler guards against.
   for (const h of handlers.session_start || []) await h({ type: 'session_start' }, ctx);
 
   await waitForServer(PORT);
@@ -132,6 +188,16 @@ before(async () => {
     ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
     ws.on('open', resolve);
     ws.on('error', reject);
+  });
+
+  // Collect every server-to-client message (responses + broadcasts).
+  broadcasts = [];
+  ws.on('message', (data) => {
+    try {
+      broadcasts.push(JSON.parse(data.toString()));
+    } catch {
+      /* ignore non-JSON */
+    }
   });
 });
 
@@ -145,6 +211,15 @@ after(async () => {
   }
   for (const h of handlers.session_shutdown || []) await h({ type: 'session_shutdown' }, ctx);
   fs.rmSync(tmpHome, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  events.length = 0;
+  broadcasts.length = 0;
+  ctx._idle = true;
+  ctx._entries = [];
+  ctx._navResult = undefined;
+  ctx._forkResult = undefined;
 });
 
 function sendCommand(command) {
@@ -166,12 +241,16 @@ function sendCommand(command) {
   });
 }
 
+// Helper: a user entry with the given id and text content.
+const userEntry = (id, content) => ({ id, type: 'message', message: { role: 'user', content } });
+
 // ── Tests ──
 
 test('prompt with /skill:name reaches pi.sendUserMessage with expandPromptTemplates true', async () => {
   const resp = await sendCommand({ id: 1, type: 'prompt', message: '/skill:alpha do the thing' });
   assert.equal(resp.success, true);
-  const call = calls.sendUserMessage.at(-1);
+  const call = events.at(-1);
+  assert.equal(call.type, 'sendUserMessage');
   assert.equal(call.message, '/skill:alpha do the thing');
   assert.equal(call.options.expandPromptTemplates, true);
 });
@@ -179,7 +258,8 @@ test('prompt with /skill:name reaches pi.sendUserMessage with expandPromptTempla
 test('plain prompt reaches pi.sendUserMessage unexpanded', async () => {
   const resp = await sendCommand({ id: 2, type: 'prompt', message: 'hello world' });
   assert.equal(resp.success, true);
-  const call = calls.sendUserMessage.at(-1);
+  const call = events.at(-1);
+  assert.equal(call.type, 'sendUserMessage');
   // The message is delivered exactly as typed — no expansion of any kind.
   assert.equal(call.message, 'hello world');
 });
@@ -193,4 +273,83 @@ test('get_commands returns pi command list', async () => {
   assert.equal(alpha.source, 'skill');
   assert.equal(alpha.description, 'Alpha test skill');
   assert.ok(resp.data.commands.some((c) => c.name === 'skill:beta'));
+});
+
+// ── inline, cancelable edit ──
+
+test('valid edit responds success and the handler branches before sending the stashed text', async () => {
+  ctx._entries = [userEntry('e1', 'original prompt')];
+  const resp = await sendCommand({ id: 100, type: 'edit', entryId: 'e1', text: 'edited prompt' });
+  assert.equal(resp.success, true);
+
+  // The stashed text is sent through the normal user message path.
+  await waitFor(() => events.some((e) => e.type === 'sendUserMessage' && e.message === 'edited prompt'));
+  const navIdx = events.findIndex((e) => e.type === 'navigateTree' && e.entryId === 'e1');
+  const sendIdx = events.findIndex((e) => e.type === 'sendUserMessage' && e.message === 'edited prompt');
+  assert.ok(navIdx !== -1, 'navigateTree (branch) was called');
+  assert.ok(sendIdx !== -1, 'stashed text was sent');
+  assert.ok(navIdx < sendIdx, 'branch happens before the send');
+  const send = events[sendIdx];
+  assert.equal(send.options.expandPromptTemplates, true, 'sent with prompt template expansion');
+
+  // A success notice is broadcast.
+  await waitFor(() => broadcasts.some((m) => m.type === 'notice' && /sent on a new branch/.test(m.text)));
+});
+
+test('dispatched command line contains the entry id but not the text', async () => {
+  ctx._entries = [userEntry('e7', 'original')];
+  const resp = await sendCommand({ id: 101, type: 'edit', entryId: 'e7', text: 'the secret replacement text' });
+  assert.equal(resp.success, true);
+  const dispatch = events.find((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-tree'));
+  assert.ok(dispatch, 'a /tau-tree command was dispatched');
+  assert.ok(dispatch.message.includes('e7'), 'command line contains the entry id');
+  assert.ok(!dispatch.message.includes('the secret replacement text'), 'command line does not contain the text');
+});
+
+test('busy agent is rejected without dispatch', async () => {
+  ctx._entries = [userEntry('e1', 'original')];
+  ctx._idle = false;
+  const resp = await sendCommand({ id: 102, type: 'edit', entryId: 'e1', text: 'edited' });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /running/i);
+  assert.ok(!events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-tree')), 'no dispatch while busy');
+});
+
+test('missing entry is rejected', async () => {
+  ctx._entries = [];
+  const resp = await sendCommand({ id: 103, type: 'edit', entryId: 'nope', text: 'edited' });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /not found/i);
+  assert.ok(!events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-tree')), 'no dispatch for a missing entry');
+});
+
+test('non-user entry is rejected', async () => {
+  ctx._entries = [{ id: 'e1', type: 'message', message: { role: 'assistant', content: 'hi' } }];
+  const resp = await sendCommand({ id: 104, type: 'edit', entryId: 'e1', text: 'edited' });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /not a user message/i);
+  assert.ok(!events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-tree')), 'no dispatch for a non-user entry');
+});
+
+test('cancelled navigation discards the stash and broadcasts an error notice', async () => {
+  ctx._entries = [userEntry('e1', 'original')];
+  ctx._navResult = { cancelled: true };
+  const resp = await sendCommand({ id: 105, type: 'edit', entryId: 'e1', text: 'edited' });
+  assert.equal(resp.success, true);
+  const nav = events.find((e) => e.type === 'navigateTree');
+  assert.ok(nav, 'navigateTree was called');
+  // The error notice is broadcast and the stashed text is never sent.
+  await waitFor(() => broadcasts.some((m) => m.type === 'notice' && m.level === 'error'));
+  assert.ok(!events.some((e) => e.type === 'sendUserMessage' && e.message === 'edited'), 'stashed text not sent after cancellation');
+});
+
+test('unchanged-text edit resends the original content', async () => {
+  const original = 'original prompt text';
+  ctx._entries = [userEntry('e1', original)];
+  const resp = await sendCommand({ id: 106, type: 'edit', entryId: 'e1', text: original });
+  assert.equal(resp.success, true);
+  await waitFor(() => events.some((e) => e.type === 'sendUserMessage' && e.message === original));
+  const send = events.find((e) => e.type === 'sendUserMessage' && e.message === original);
+  assert.ok(send, 'the original content was resent');
+  assert.equal(send.options.expandPromptTemplates, true);
 });

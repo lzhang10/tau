@@ -347,15 +347,10 @@ export default function (pi: ExtensionAPI) {
     broadcast({ type: "notice", level, text });
   }
 
-  function extractUserText(entry: any): string {
-    if (entry?.type !== "message") return "";
-    const content = entry.message?.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-    }
-    return "";
-  }
+  // Process-local stash for the pending inline edit. Set by the
+  // WS handler, consumed by the /tau-tree edit handler, and cleared on
+  // success, failure, and cancellation so it cannot leak across edits.
+  let pendingEdit: { entryId: string; text: string } | null = null;
 
   pi.registerCommand("tau-tree", {
     description: "Branch session history: re-ask, edit, fork (hidden — dispatched by the Tau mirror)",
@@ -383,19 +378,23 @@ export default function (pi: ExtensionAPI) {
             break;
           }
           case "edit": {
+            // Branch first, then send the stashed replacement
+            // text through the normal user message path. The stash was set
+            // by the WS handler; clear it on every exit path.
             await ctx.waitForIdle();
             const nav = await ctx.navigateTree(entryId);
             if (nav.cancelled) {
+              pendingEdit = null;
               broadcastNotice("error", "Edit cancelled");
               return;
             }
-            const entry = ctx.sessionManager.getEntry(entryId);
-            const text = extractUserText(entry);
-            if (!text) {
-              throw new Error("Edit failed: message has no text content");
+            const stashed = pendingEdit;
+            pendingEdit = null;
+            if (!stashed) {
+              throw new Error("Edit failed: no stashed text");
             }
-            broadcast({ type: "composer_prefill", text });
-            broadcastNotice("info", "Edit: message loaded into composer");
+            pi.sendUserMessage(stashed.text, { expandPromptTemplates: true });
+            broadcastNotice("info", "Edit: message sent on a new branch");
             break;
           }
           case "fork": {
@@ -412,6 +411,7 @@ export default function (pi: ExtensionAPI) {
             throw new Error(`Unknown action: ${action}`);
         }
       } catch (e: any) {
+        pendingEdit = null;
         broadcastNotice("error", `tau-tree ${action || ""}: ${e?.message || e}`.trim());
       }
     },
@@ -903,11 +903,10 @@ export default function (pi: ExtensionAPI) {
         }
 
         // ─── Tree management ───
-        // re_ask / edit / fork: guard, then dispatch the hidden /tau-tree
-        // command through the pi dispatcher. The command handler performs
-        // the operation and broadcasts the outcome (notice / composer_prefill).
+        // re_ask / fork: guard, then dispatch the hidden /tau-tree command
+        // through the pi dispatcher. The command handler performs the
+        // operation and broadcasts the outcome notice.
         case "re_ask":
-        case "edit":
         case "fork": {
           const action = command.type === "re_ask" ? "re-ask" : command.type;
           if (!ctx) {
@@ -935,6 +934,46 @@ export default function (pi: ExtensionAPI) {
           // Dispatch is fire-and-forget; the handler broadcasts the outcome.
           sendTo(ws, success(command.type, { dispatched: true }));
           pi.sendUserMessage(`/tau-tree ${action} ${entryId}`, { expandPromptTemplates: true });
+          break;
+        }
+
+        // Inline edit. Carries the full replacement text. The text
+        // is stashed process-locally and never appears in the dispatched
+        // command line; the handler branches first, then sends the stashed
+        // text through the normal user message path.
+        case "edit": {
+          if (!ctx) {
+            sendTo(ws, error("edit", "No context available"));
+            break;
+          }
+          if (!ctx.isIdle()) {
+            sendTo(ws, error("edit", "Agent is running. Wait for it to finish."));
+            break;
+          }
+          const entryId = command.entryId;
+          if (!entryId || typeof entryId !== "string") {
+            sendTo(ws, error("edit", "entryId is required"));
+            break;
+          }
+          const text = command.text;
+          if (typeof text !== "string") {
+            sendTo(ws, error("edit", "text is required"));
+            break;
+          }
+          const entry = ctx.sessionManager.getEntry(entryId);
+          if (!entry) {
+            sendTo(ws, error("edit", `Entry not found: ${entryId}`));
+            break;
+          }
+          if (entry.type !== "message" || entry.message?.role !== "user") {
+            sendTo(ws, error("edit", "Entry is not a user message"));
+            break;
+          }
+          pendingEdit = { entryId, text };
+          // Dispatch is fire-and-forget; the handler branches, then sends the
+          // stashed text and broadcasts the outcome.
+          sendTo(ws, success("edit", { dispatched: true }));
+          pi.sendUserMessage(`/tau-tree edit ${entryId}`, { expandPromptTemplates: true });
           break;
         }
 

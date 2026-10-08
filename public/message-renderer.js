@@ -10,6 +10,15 @@ export class MessageRenderer {
     this.container = container;
     this.isNearBottom = true;
 
+    // Inline edit state (frontend-local, at most one open at a
+    // time). Opening and cancelling make no server calls.
+    this._isEditing = false;
+    this._editingEl = null;
+    this._editingEntryId = null;
+    this._editingOriginalHtml = null;
+    this._editTextarea = null;
+    this._editHandlers = null;
+
     // Track scroll position for smart auto-scroll
     this.container.addEventListener('scroll', () => {
       const threshold = 100;
@@ -19,7 +28,101 @@ export class MessageRenderer {
   }
 
   clear() {
+    // A re-render replaces the DOM, so an open editor cannot
+    // survive by reference — discard it and reset the editing state.
+    if (this._isEditing) {
+      this._resetEditorState();
+      this._editHandlers?.onEditingChange?.(false);
+    }
     this.container.innerHTML = '';
+  }
+
+  // ── inline, cancelable edit of a user turn ──
+
+  isEditing() {
+    return this._isEditing;
+  }
+
+  setEditHandlers(handlers) {
+    // handlers: { onEditingChange(isEditing), submit(entryId, text) }
+    this._editHandlers = handlers || null;
+  }
+
+  /**
+   * Swap the message content for an inline textarea prefilled with the
+   * original text, with Send and Cancel controls. Any open editor is
+   * discarded first, so at most one exists. Makes no server calls.
+   */
+  openEditor(messageEl, entryId, originalText) {
+    if (this._isEditing) {
+      const prev = this._editingEl?.querySelector('.message-content');
+      if (prev) prev.innerHTML = this._editingOriginalHtml || '';
+      this._editingEl?.classList.remove('editing');
+      this._resetEditorState();
+    }
+    const contentEl = messageEl.querySelector('.message-content');
+    if (!contentEl) return;
+    this._editingEl = messageEl;
+    this._editingEntryId = entryId;
+    this._editingOriginalHtml = contentEl.innerHTML;
+    this._isEditing = true;
+    messageEl.classList.add('editing');
+
+    contentEl.innerHTML = `
+      <div class="inline-editor">
+        <textarea class="inline-editor-textarea" rows="2">${this.escapeHtml(originalText)}</textarea>
+        <div class="inline-editor-actions">
+          <button type="button" class="inline-editor-btn inline-editor-send">Send</button>
+          <button type="button" class="inline-editor-btn inline-editor-cancel">Cancel</button>
+        </div>
+      </div>`;
+
+    const ta = contentEl.querySelector('.inline-editor-textarea');
+    this._editTextarea = ta;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    // Keyboard contract: Enter submits, Shift+Enter inserts a newline, Esc cancels.
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        this._submitEdit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.closeEditor();
+      }
+    });
+    contentEl.querySelector('.inline-editor-send').addEventListener('click', () => this._submitEdit());
+    contentEl.querySelector('.inline-editor-cancel').addEventListener('click', () => this.closeEditor());
+
+    this._editHandlers?.onEditingChange?.(true);
+  }
+
+  _submitEdit() {
+    if (!this._isEditing) return;
+    const text = this._editTextarea?.value ?? '';
+    this._editHandlers?.submit?.(this._editingEntryId, text);
+    // The editor stays open: it closes on the sync re-render (success) or
+    // remains with the text intact after a failed submit.
+  }
+
+  closeEditor() {
+    if (!this._isEditing) return;
+    const contentEl = this._editingEl?.querySelector('.message-content');
+    if (contentEl) contentEl.innerHTML = this._editingOriginalHtml || '';
+    this._editingEl?.classList.remove('editing');
+    this._resetEditorState();
+    this._editHandlers?.onEditingChange?.(false);
+  }
+
+  _resetEditorState() {
+    this._isEditing = false;
+    this._editingEl = null;
+    this._editingEntryId = null;
+    this._editingOriginalHtml = null;
+    this._editTextarea = null;
   }
 
   /**
@@ -66,6 +169,9 @@ export class MessageRenderer {
     // Entry id from the session file — required by the tree action buttons.
     // Live-rendered messages (no id yet) get their id after the next mirror sync.
     div.dataset.messageId = message.id || '';
+    // The raw prompt text, prefilled into the inline editor.
+    // rendered markdown's textContent is not the original (markup is lost).
+    div._rawText = typeof message.content === 'string' ? message.content : '';
 
     let imagesHtml = '';
     if (message.images && message.images.length > 0) {
@@ -90,7 +196,7 @@ export class MessageRenderer {
       <div class="message-content">${imagesHtml}${contentHtml}</div>
       <div class="message-actions">
         <button class="message-action-btn" data-action="re-ask" title="Re-ask: branch here and resend this message"${actionsDisabled}>Re-ask</button>
-        <button class="message-action-btn" data-action="edit" title="Edit: branch here and load this message into the composer"${actionsDisabled}>Edit</button>
+        <button class="message-action-btn" data-action="edit" title="Edit: branch here and replace this message"${actionsDisabled}>Edit</button>
         <button class="message-action-btn" data-action="fork" title="Fork: create a new session from this message"${actionsDisabled}>Fork</button>
       </div>
       <button class="message-copy-btn" aria-label="Copy message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>

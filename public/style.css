@@ -3004,10 +3004,88 @@ body.hide-thinking .thinking-block { display: none !important; }
 .message-action-btn:active { transform: scale(0.95); }
 
 .message-action-btn:disabled,
-body.agent-streaming .message-action-btn {
+body.agent-streaming .message-action-btn,
+body.message-editing .message-action-btn {
   opacity: 0.35;
   cursor: default;
   pointer-events: none;
+}
+
+/* ══════════════════════════════════════════════════
+   Inline, cancelable edit of a user turn
+   Swaps the message content for a textarea in place. Visually distinct
+   from the rendered message. Enter submits, Shift+Enter newline, Esc cancels.
+   ═══════════════════════════════════════════════════ */
+
+.message.user.editing .message-content {
+  width: 100%;
+}
+
+.inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-glass);
+  box-shadow: 0 0 0 3px var(--accent-glow), var(--shadow-inset);
+}
+
+.inline-editor-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  background: var(--bg-glass-hover);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.45;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  max-height: 300px;
+  transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
+}
+
+.inline-editor-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.inline-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.inline-editor-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  background: var(--bg-glass);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--duration) var(--ease), border-color var(--duration) var(--ease), transform 0.1s var(--ease);
+}
+
+.inline-editor-btn:hover { background: var(--bg-glass-hover); border-color: var(--accent); }
+.inline-editor-btn:active { transform: scale(0.97); }
+
+.inline-editor-btn.inline-editor-send {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.inline-editor-btn.inline-editor-send:hover {
+  background: var(--accent-glow);
 }
 
 /* ═══════════════════════════════════════════════════

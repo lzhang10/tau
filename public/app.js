@@ -175,7 +175,9 @@ scrollBottomBtn.addEventListener('click', () => {
 });
 
 // Tree management buttons on user turns.
-// Re-ask / Edit / Fork — send the WS command with the entry id.
+// Re-ask / Fork — send the WS command with the entry id.
+// Edit — open the inline, cancelable editor (no server contact
+// until the user submits).
 messagesContainer.addEventListener('click', (e) => {
   const btn = e.target.closest?.('.message-action-btn');
   if (!btn || btn.disabled) return;
@@ -183,8 +185,24 @@ messagesContainer.addEventListener('click', (e) => {
   const entryId = msgEl?.dataset?.messageId;
   if (!entryId) return;
   const action = btn.dataset.action;
+  if (action === 'edit') {
+    messageRenderer.openEditor(msgEl, entryId, msgEl._rawText ?? '');
+    return;
+  }
   const wsType = action === 're-ask' ? 're_ask' : action;
   wsClient.send({ type: wsType, entryId });
+});
+
+// Wire the inline editor to the app. The renderer owns the editor
+// DOM and state; the app owns the composer, the body class, and the WS send.
+messageRenderer.setEditHandlers({
+  onEditingChange: (isEditing) => {
+    document.body.classList.toggle('message-editing', isEditing);
+    syncComposerState();
+  },
+  submit: (entryId, text) => {
+    wsClient.send({ type: 'edit', entryId, text });
+  },
 });
 
 function showNewMessageBadge() {
@@ -227,13 +245,14 @@ wsClient.addEventListener('mirrorSync', (e) => {
   handleMirrorSync(e.detail);
 });
 
-// Edit: load the original prompt into the composer
-wsClient.addEventListener('composerPrefill', (e) => {
-  const text = e.detail?.text;
-  if (typeof text !== 'string') return;
-  messageInput.value = text;
-  messageInput.dispatchEvent(new Event('input'));
-  messageInput.focus();
+// A failed edit submit (e.g. the agent is busy) arrives as a
+// command response. Show an error toast; the editor stays open with the text
+// intact so the user can retry.
+wsClient.addEventListener('commandResponse', (e) => {
+  const { command, success, error } = e.detail || {};
+  if (command === 'edit' && success === false) {
+    showNotice('error', error || 'Edit failed');
+  }
 });
 
 // Notice toast for tree command outcomes
@@ -1512,20 +1531,29 @@ async function pollInstances() {
 setInterval(pollInstances, 5000);
 pollInstances();
 
+// Enable/disable the composer. Centralized so updateUI and
+// updateMirrorInputState agree. The composer is also disabled
+// while the inline editor is open, so no turn can start underneath the edit.
+function syncComposerState() {
+  const readOnly = isMirrorMode && !viewingActiveSession;
+  const editing = messageRenderer.isEditing();
+  const disabled = readOnly || editing;
+  messageInput.disabled = disabled;
+  sendBtn.disabled = disabled;
+  messageInput.placeholder = readOnly ? 'Viewing historical session (read-only)' : 'Message...';
+}
+
 // Enable/disable input based on whether we're viewing the live session
 function updateMirrorInputState() {
   if (!isMirrorMode) return;
 
   const inputArea = document.querySelector('.input-area');
   if (viewingActiveSession) {
-    messageInput.disabled = false;
-    messageInput.placeholder = 'Message...';
     inputArea?.classList.remove('mirror-readonly');
   } else {
-    messageInput.disabled = true;
-    messageInput.placeholder = 'Viewing historical session (read-only)';
     inputArea?.classList.add('mirror-readonly');
   }
+  syncComposerState();
 }
 
 // ═══════════════════════════════════════
@@ -1743,8 +1771,7 @@ function updateUI() {
   // Disable tree action buttons while the agent runs
   document.body.classList.toggle('agent-streaming', isStreaming);
 
-  messageInput.disabled = false;
-  sendBtn.disabled = false;
+  syncComposerState();
 
   if (isStreaming) {
     abortBtn.classList.remove('hidden');
