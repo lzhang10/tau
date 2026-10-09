@@ -78,7 +78,7 @@ let isMirrorMode = false; // Set when mirror_sync received
 let liveInstances = []; // All running Tau instances [{port, sessionFile, cwd}]
 // The historical session currently viewed (from the sidebar list). Feeds
 // the metadata panel in the read-only composer area.
-let viewedSession = null; // { filePath, name, firstMessage, mtime, cwd, ... }
+let viewedSession = null; // { filePath, name, firstMessage, lastMessage, mtime, cwd, ... }
 let viewedProject = null; // { path, dirName, sessions }
 let resumePending = false; // A resume_session dispatch is in flight
 
@@ -1638,9 +1638,12 @@ function updateSessionMetaPanel() {
     resumeBtn.disabled = false;
     return;
   }
-  sessionMetaName.textContent = viewedSession.name || viewedSession.firstMessage || 'Untitled';
+  // Title shows the first message (what the session was about); the snippet
+  // shows the last message (where it left off), so the user can decide if a
+  // resume is needed.
+  sessionMetaName.textContent = viewedSession.firstMessage || 'Untitled';
   sessionMetaPath.textContent = viewedProject?.path || viewedSession.cwd || '';
-  sessionMetaSnippet.textContent = viewedSession.firstMessage || '';
+  sessionMetaSnippet.textContent = viewedSession.lastMessage || '';
   sessionMetaActivity.textContent = formatLastActive(viewedSession.mtime || 0);
   const elsewhere = findLiveElsewhere(viewedSession.filePath);
   if (elsewhere) {

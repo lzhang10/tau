@@ -1668,6 +1668,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
 
     let header: any = null;
     let firstMessage: string | null = null;
+    let lastMessage: string | null = null;
     let sessionName: string | null = null;
     let userMessageCount = 0;
     let lineCount = 0;
@@ -1680,20 +1681,24 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
         const entry = JSON.parse(line);
         if (entry.type === "session") header = entry;
         else if (entry.type === "session_info" && entry.name) sessionName = entry.name;
-        else if (entry.type === "message" && entry.message?.role === "user") {
-          userMessageCount++;
-          if (!firstMessage) {
-            const content = entry.message.content;
-            if (typeof content === "string") firstMessage = content.substring(0, 120);
-            else if (Array.isArray(content)) {
-              const tb = content.find((b: any) => b.type === "text");
-              if (tb) firstMessage = tb.text.substring(0, 120);
+        else if (entry.type === "message" && entry.message?.role) {
+          const content = entry.message.content;
+          let text = "";
+          if (typeof content === "string") text = content;
+          else if (Array.isArray(content)) {
+            const tb = content.find((b: any) => b.type === "text");
+            if (tb) text = tb.text;
+          }
+          if (text) {
+            if (entry.message.role === "user") {
+              userMessageCount++;
+              if (!firstMessage) firstMessage = text.substring(0, 120);
             }
+            // The last message of any role shows where the session left off.
+            lastMessage = text.substring(0, 120);
           }
         }
       } catch { /* skip */ }
-
-      if (lineCount > 50 && firstMessage) break;
     }
 
     rl.close();
@@ -1709,6 +1714,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       timestamp: header.timestamp || "",
       name: sessionName,
       firstMessage,
+      lastMessage,
       cwd: header.cwd || null,
     };
   }
