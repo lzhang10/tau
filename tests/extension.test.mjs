@@ -73,10 +73,17 @@ function makeMocks() {
     // Test knobs (reset per test in beforeEach)
     _idle: true,
     _entries: [],
+    _stale: false,
     _navResult: undefined,
     _forkResult: undefined,
     _switchResult: undefined,
-    isIdle: () => ctx._idle,
+    // Mirrors pi's ExtensionRunner.assertActive: throws once a session
+    // replacement invalidates the ctx, so tests can exercise the stale-ctx
+    // path a real resume triggers.
+    assertActive: () => {
+      if (ctx._stale) throw new Error('This extension ctx is stale after session replacement');
+    },
+    isIdle: () => { ctx.assertActive(); return ctx._idle; },
     waitForIdle: async () => {},
     switchSession: async (sessionPath, opts) => {
       events.push({ type: 'switchSession', sessionPath, opts });
@@ -93,12 +100,12 @@ function makeMocks() {
     model: { id: 'test-model', provider: 'test-provider' },
     modelRegistry: { getAvailable: async () => [] },
     sessionManager: {
-      getSessionFile: () => path.join(tmpHome, 'test-session.jsonl'),
-      getEntries: () => ctx._entries,
-      getBranch: () => ctx._entries,
-      getEntry: (id) => ctx._entries.find((e) => e.id === id),
+      getSessionFile: () => { ctx.assertActive(); return path.join(tmpHome, 'test-session.jsonl'); },
+      getEntries: () => { ctx.assertActive(); return ctx._entries; },
+      getBranch: () => { ctx.assertActive(); return ctx._entries; },
+      getEntry: (id) => { ctx.assertActive(); return ctx._entries.find((e) => e.id === id); },
     },
-    getContextUsage: () => null,
+    getContextUsage: () => { ctx.assertActive(); return null; },
     ui: { setStatus: () => {}, notify: () => {} },
     cwd: tmpHome,
     abort: () => {},
@@ -224,6 +231,7 @@ beforeEach(() => {
   broadcasts.length = 0;
   ctx._idle = true;
   ctx._entries = [];
+  ctx._stale = false;
   ctx._navResult = undefined;
   ctx._forkResult = undefined;
   ctx._switchResult = undefined;
@@ -473,6 +481,37 @@ test('a fresh module closure adopts the running server instead of restarting', a
     req.on('error', () => resolve(null));
   });
   assert.equal(probe, null, 'no second server on the next port');
+});
+
+test('a new browser connection after a resume switch gets a snapshot (no stale-ctx crash)', async () => {
+  // Invalidate the original ctx, like pi does on session replacement. The
+  // surviving server's connection handler is the FIRST closure's; without
+  // the shared-ctx fix it would read this stale ctx and throw from
+  // assertActive instead of sending a snapshot.
+  ctx._stale = true;
+
+  // A fresh module closure adopts the running server; its session_start
+  // handler pins the fresh ctx as the shared latestCtx.
+  const jiti3 = require('jiti')(import.meta.url);
+  const ext3 = jiti3(new URL('../extensions/mirror-server.ts', import.meta.url).pathname).default;
+  const mock3 = makeMocks();
+  ext3(mock3.pi);
+  for (const h of mock3.handlers.session_start || []) await h({ type: 'session_start' }, mock3.ctx);
+
+  // A NEW browser client connects after the switch. It must receive a
+  // snapshot built from the fresh shared ctx, not crash on the stale one.
+  const ws2 = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+  const snapshot = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no snapshot after resume reconnect')), 5000);
+    ws2.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'mirror_sync') { clearTimeout(timer); resolve(msg); }
+    });
+    ws2.on('error', reject);
+  });
+  await new Promise((resolve) => { ws2.on('close', resolve); ws2.close(); });
+  assert.ok(snapshot, 'a fresh snapshot was sent to the reconnecting client');
+  assert.equal(snapshot.sessionFile, path.join(tmpHome, 'test-session.jsonl'));
 });
 
 test('a quit stops the shared server', async () => {

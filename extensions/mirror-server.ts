@@ -220,8 +220,24 @@ export default function (pi: ExtensionAPI) {
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let clients = new Set<WebSocket>();
 
-  // Store latest context reference for use in command handlers
-  let latestCtx: ExtensionContext | null = null;
+  // Latest context for command handlers and the surviving server's
+  // connection handler.
+  //
+  // Lives on globalThis (pid-keyed), not in the module closure: pi
+  // re-executes this extension on every session switch (fresh closure)
+  // while the running server survives with the FIRST closure's connection
+  // handler. A per-closure `let` goes stale after resume/fork/new —
+  // session replacement invalidates the previous ctx, and a later read
+  // (buildStateSnapshot, handleCommand's isIdle) throws from assertActive.
+  // Sharing the slot means every surviving closure reads the fresh ctx the
+  // newest session_start handler wrote.
+  const LATEST_CTX_KEY = `__tauLatestCtx_${process.pid}`;
+  function getLatestCtx(): ExtensionContext | null {
+    return (globalThis as any)[LATEST_CTX_KEY] ?? null;
+  }
+  function setLatestCtx(ctx: ExtensionContext | null): void {
+    (globalThis as any)[LATEST_CTX_KEY] = ctx;
+  }
 
   // Pending RPC-style requests from browser (id -> resolver)
   let pendingRequests = new Map<string, (response: any) => void>();
@@ -467,7 +483,7 @@ export default function (pi: ExtensionAPI) {
 
   for (const eventType of eventTypes) {
     pi.on(eventType as any, async (event: any, ctx: ExtensionContext) => {
-      latestCtx = ctx;
+      setLatestCtx(ctx);
 
       // Forward event to all connected browser clients
       // Wrap in { type: "event", event: ... } to match the existing frontend protocol
@@ -482,7 +498,7 @@ export default function (pi: ExtensionAPI) {
   let userMessages: string[] = [];
 
   pi.on("session_start", async (_event, ctx) => {
-    latestCtx = ctx;
+    setLatestCtx(ctx);
     turnCount = 0;
     titleSet = false;
     userMessages = [];
@@ -498,7 +514,7 @@ export default function (pi: ExtensionAPI) {
   // Tree navigation (Re-ask / Edit) moves the active leaf.
   // Push the active branch to all clients so the browser stays in sync.
   pi.on("session_tree", async (_event, ctx) => {
-    latestCtx = ctx;
+    setLatestCtx(ctx);
     const snapshot = await buildStateSnapshot(ctx);
     broadcast(snapshot);
   });
@@ -623,7 +639,7 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   async function handleCommand(ws: WebSocket, command: any) {
     const id = command.id;
-    const ctx = latestCtx;
+    const ctx = getLatestCtx();
 
     const success = (cmd: string, data?: any) => {
       const resp: any = { type: "response", command: cmd, success: true, id };
@@ -1279,9 +1295,9 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
         const filesUrl = new URL(`http://localhost${req.url}`);
         const explicitPath = filesUrl.searchParams.get("path");
         let dirPath = explicitPath || process.cwd();
-        if (!explicitPath && latestCtx) {
+        if (!explicitPath && getLatestCtx()) {
           try {
-            const entries = latestCtx.sessionManager.getEntries();
+            const entries = getLatestCtx()!.sessionManager.getEntries();
             const sessionEntry = entries.find((e: any) => e.type === "session");
             if ((sessionEntry as any)?.cwd) dirPath = (sessionEntry as any).cwd;
           } catch {}
@@ -1513,7 +1529,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
 
       const tmuxFiles = getTmuxSessionFiles();
       const readline = await import("node:readline");
-      const activeFile = latestCtx?.sessionManager?.getSessionFile?.() || "";
+      const activeFile = getLatestCtx()?.sessionManager?.getSessionFile?.() || "";
       const dirEntries = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true });
       const projects: any[] = [];
 
@@ -1872,8 +1888,11 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       tailscaleUrl = stashed.tailscaleUrl;
       // The session-start snapshot handler runs before this adoption, so
       // re-broadcast the snapshot over the surviving connections.
-      if (latestCtx) {
-        buildStateSnapshot(latestCtx).then((snapshot) => broadcast(snapshot));
+      const adoptedCtx = getLatestCtx();
+      if (adoptedCtx) {
+        buildStateSnapshot(adoptedCtx)
+          .then((snapshot) => broadcast(snapshot))
+          .catch((e) => console.error("[Mirror] adoption snapshot failed:", e?.message || e));
       }
       return;
     }
@@ -1913,10 +1932,15 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       sendTo(ws, { type: "state", isStreaming: false, mode: "mirror" });
 
       // Immediately send state snapshot
-      if (latestCtx) {
-        buildStateSnapshot(latestCtx).then((snapshot) => {
-          sendTo(ws, snapshot);
-        });
+      const snapCtx = getLatestCtx();
+      if (snapCtx) {
+        // A session replacement can leave the shared ctx briefly stale
+        // (between the switch and the new session_start handler). If the
+        // snapshot throws, skip it: the session_start broadcast that
+        // follows re-sends a fresh one to this client.
+        buildStateSnapshot(snapCtx)
+          .then((snapshot) => sendTo(ws, snapshot))
+          .catch((e) => console.error("[Mirror] connect snapshot failed:", e?.message || e));
       }
 
       ws.on("message", (data) => {
@@ -2057,7 +2081,7 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
   // Auto-start on session begin
   // ═══════════════════════════════════════
   pi.on("session_start", async (_event, ctx) => {
-    latestCtx = ctx;
+    setLatestCtx(ctx);
 
     // Skip mirror startup in subagent child processes
     // (pi-subagents sets PI_SUBAGENT_CHILD=1; child processes loading Tau
