@@ -239,6 +239,20 @@ export default function (pi: ExtensionAPI) {
     (globalThis as any)[LATEST_CTX_KEY] = ctx;
   }
 
+  // The pi API object, shared for the same reason as latestCtx: the
+  // surviving server's handlers capture the FIRST closure's pi, and pi
+  // invalidates that api on the first session switch. A second resume then
+  // calls pi.sendUserMessage on the stale api and throws. Reading the fresh
+  // api from globalThis keeps every surviving closure on the current pi.
+  const PI_KEY = `__tauPi_${process.pid}`;
+  function getPi(): ExtensionAPI {
+    return (globalThis as any)[PI_KEY];
+  }
+  function setPi(next: ExtensionAPI): void {
+    (globalThis as any)[PI_KEY] = next;
+  }
+  setPi(pi);
+
   // Pending RPC-style requests from browser (id -> resolver)
   let pendingRequests = new Map<string, (response: any) => void>();
 
@@ -609,6 +623,7 @@ export default function (pi: ExtensionAPI) {
   // Build state snapshot for new connections
   // ═══════════════════════════════════════
   async function buildStateSnapshot(ctx: ExtensionContext) {
+    const pi = getPi();
     // Get the active branch for message history.
     // getEntries() would include abandoned branches from tree navigation.
     const entries = ctx.sessionManager.getBranch();
@@ -638,6 +653,7 @@ export default function (pi: ExtensionAPI) {
   // Handle commands from browser clients
   // ═══════════════════════════════════════
   async function handleCommand(ws: WebSocket, command: any) {
+    const pi = getPi();
     const id = command.id;
     const ctx = getLatestCtx();
 

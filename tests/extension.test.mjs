@@ -181,6 +181,7 @@ let events;
 let broadcasts;
 let ctx;
 let handlers;
+let firstPi; // The FIRST closure's pi api (surviving server's captured api)
 let mock2; // Fresh module closure (adoption test)
 
 before(async () => {
@@ -188,6 +189,7 @@ before(async () => {
   events = mock.events;
   ctx = mock.ctx;
   handlers = mock.handlers;
+  firstPi = mock.pi;
 
   extension(mock.pi);
 
@@ -512,6 +514,36 @@ test('a new browser connection after a resume switch gets a snapshot (no stale-c
   await new Promise((resolve) => { ws2.on('close', resolve); ws2.close(); });
   assert.ok(snapshot, 'a fresh snapshot was sent to the reconnecting client');
   assert.equal(snapshot.sessionFile, path.join(tmpHome, 'test-session.jsonl'));
+});
+
+test('a second resume_session dispatches via the fresh pi api, not the stale first-closure one', async () => {
+  // A fresh module closure stands in for the post-resume closure; loading it
+  // points the shared pi at its api, like a real session switch does.
+  const jiti4 = require('jiti')(import.meta.url);
+  const ext4 = jiti4(new URL('../extensions/mirror-server.ts', import.meta.url).pathname).default;
+  const mock4 = makeMocks();
+  ext4(mock4.pi);
+
+  // Invalidate the FIRST closure's pi (mock.pi), like pi does on a session
+  // switch. The surviving server's handleCommand is the first closure's;
+  // without the shared-pi fix it would call sendUserMessage on this stale
+  // api and throw, so the /tau-resume dispatch would never reach the fresh
+  // closure's dispatcher.
+  const originalSend = firstPi.sendUserMessage;
+  firstPi.sendUserMessage = () => {
+    throw new Error('This extension pi is stale after session replacement');
+  };
+
+  const p = writeSessionFile('second-resume.jsonl', sessionLines(tmpHome));
+  const resp = await sendCommand({ id: 300, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, true, 'the resume_session rpc responds success');
+
+  // The dispatch must reach the FRESH closure's dispatcher (mock4.pi), not
+  // the stale first-closure pi. With the shared-pi fix, handleCommand reads
+  // getPi() (mock4.pi) and the dispatch is recorded in mock4.events.
+  await waitFor(() => mock4.events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-resume')));
+
+  firstPi.sendUserMessage = originalSend;
 });
 
 test('a quit stops the shared server', async () => {
