@@ -218,13 +218,13 @@ export default function (pi: ExtensionAPI) {
   let server: http.Server | null = null;
   let wss: WebSocketServer | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
-  const clients = new Set<WebSocket>();
+  let clients = new Set<WebSocket>();
 
   // Store latest context reference for use in command handlers
   let latestCtx: ExtensionContext | null = null;
 
   // Pending RPC-style requests from browser (id -> resolver)
-  const pendingRequests = new Map<string, (response: any) => void>();
+  let pendingRequests = new Map<string, (response: any) => void>();
 
   // ═══════════════════════════════════════
   // Helper: send to one client
@@ -254,6 +254,7 @@ export default function (pi: ExtensionAPI) {
   // Helper: stop the server
   // ═══════════════════════════════════════
   function stopServer() {
+    (globalThis as any)[STASH_KEY] = undefined;
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
@@ -413,6 +414,40 @@ export default function (pi: ExtensionAPI) {
       } catch (e: any) {
         pendingEdit = null;
         broadcastNotice("error", `tau-tree ${action || ""}: ${e?.message || e}`.trim());
+      }
+    },
+  });
+
+  // ═════════════════════════════════════════════════
+  // /tau-resume — hidden session-resume command
+  // Dispatched by the WS handler (resume_session) so the pi
+  // dispatcher runs it without adding a user entry to the session.
+  // The switch uses ctx.switchSession, the same operation the TUI's
+  // /resume command uses, so browser and terminal share one code path.
+  // The session_start snapshot that follows re-renders the browser.
+  // ═════════════════════════════════════════════════
+  pi.registerCommand("tau-resume", {
+    description: "Resume a historical session (hidden — dispatched by the Tau mirror)",
+    handler: async (args, ctx) => {
+      const target = args.trim();
+      if (!target) throw new Error("Missing session path");
+      try {
+        await ctx.waitForIdle();
+        const result = await ctx.switchSession(target, {
+          // TUI status line so a terminal watcher sees the browser resume.
+          withSession: async (next) => {
+            next.ui.notify("Resumed session", "info");
+          },
+        });
+        if (result.cancelled) {
+          broadcastNotice("error", "Resume cancelled");
+        }
+        // On success the session-start snapshot re-renders the browser; no
+        // notice is needed.
+      } catch (e: any) {
+        // The TUI's own missing-directory prompt covers the race where the
+        // directory vanishes between validation and the switch.
+        broadcastNotice("error", `Resume failed: ${e?.message || e}`);
       }
     },
   });
@@ -934,6 +969,59 @@ export default function (pi: ExtensionAPI) {
           // Dispatch is fire-and-forget; the handler broadcasts the outcome.
           sendTo(ws, success(command.type, { dispatched: true }));
           pi.sendUserMessage(`/tau-tree ${action} ${entryId}`, { expandPromptTemplates: true });
+          break;
+        }
+
+        // Resume a historical session. Server-side validation, in order:
+        // the path resolves inside the session directory, the file exists
+        // and is a session JSONL, and the recorded working directory exists.
+        // Each failure is a distinct, human-readable error. On success the
+        // hidden /tau-resume command is dispatched; the session-start
+        // snapshot that follows re-renders the browser.
+        case "resume_session": {
+          if (!ctx) {
+            sendTo(ws, error("resume_session", "No context available"));
+            break;
+          }
+          if (!ctx.isIdle()) {
+            sendTo(ws, error("resume_session", "Agent is running. Wait for it to finish."));
+            break;
+          }
+          const sessionFile = command.sessionFile;
+          if (!sessionFile || typeof sessionFile !== "string") {
+            sendTo(ws, error("resume_session", "sessionFile is required"));
+            break;
+          }
+          const resolved = path.resolve(sessionFile);
+          const sessionsRoot = path.resolve(SESSIONS_DIR);
+          if (resolved !== sessionsRoot && !resolved.startsWith(sessionsRoot + path.sep)) {
+            sendTo(ws, error("resume_session", "Session file must be inside the session directory"));
+            break;
+          }
+          if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+            sendTo(ws, error("resume_session", `Session file not found: ${resolved}`));
+            break;
+          }
+          const header = await readSessionHeader(resolved);
+          if (!header) {
+            sendTo(ws, error("resume_session", `Not a session file: ${resolved}`));
+            break;
+          }
+          if (!header.cwd) {
+            sendTo(ws, error("resume_session", "Session has no recorded working directory"));
+            break;
+          }
+          if (!fs.existsSync(header.cwd) || !fs.statSync(header.cwd).isDirectory()) {
+            sendTo(ws, error("resume_session", `Session directory no longer exists: ${header.cwd}`));
+            break;
+          }
+          // Re-check the instance registry at dispatch time. The warning
+          // does not block; the browser shows it in the metadata panel.
+          const liveElsewhere = getRunningInstances().some(
+            (i) => i.sessionFile === resolved && i.pid !== process.pid
+          );
+          sendTo(ws, success("resume_session", { dispatched: true, liveElsewhere }));
+          pi.sendUserMessage(`/tau-resume ${resolved}`, { expandPromptTemplates: true });
           break;
         }
 
@@ -1513,6 +1601,33 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
   }
 
   // ═══════════════════════════════════════
+  // Read the session header (the first "session" entry) from a JSONL file.
+  // Returns { id, cwd } or null when the file has no session header.
+  // ═════════════════════════════════════════════════
+  async function readSessionHeader(filePath: string): Promise<{ id: string; cwd: string | null } | null> {
+    const readline = await import("node:readline");
+    const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let header: any = null;
+    try {
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type === "session") {
+            header = entry;
+            break;
+          }
+        } catch { /* skip non-JSON line */ }
+      }
+    } finally {
+      rl.close();
+      stream.destroy();
+    }
+    if (!header?.id) return null;
+    return { id: header.id, cwd: header.cwd || null };
+  }
+
   // Parse session file header
   // ═══════════════════════════════════════
   async function parseSessionFile(filePath: string, readline: any, includePipe = false) {
@@ -1738,7 +1853,30 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
   // ═══════════════════════════════════════
   // Start server function (reusable)
   // ═══════════════════════════════════════
+  // pi re-executes this extension module on every session switch (fresh
+  // closure), but the mirror must survive the switch: the
+  // running server is stashed on globalThis keyed by pid and adopted by the
+  // new closure. A restart would drop the browser connection and replace
+  // the "Resumed session" status line with a restart notice.
+  const STASH_KEY = `__tauMirrorServer_${process.pid}`;
+
   function startServer(ctx: ExtensionContext) {
+    const stashed = (globalThis as any)[STASH_KEY];
+    if (stashed && stashed.alive) {
+      server = stashed.server;
+      wss = stashed.wss;
+      clients = stashed.clients;
+      heartbeatTimer = stashed.heartbeatTimer;
+      pendingRequests = stashed.pendingRequests;
+      mirrorUrl = stashed.mirrorUrl;
+      tailscaleUrl = stashed.tailscaleUrl;
+      // The session-start snapshot handler runs before this adoption, so
+      // re-broadcast the snapshot over the surviving connections.
+      if (latestCtx) {
+        buildStateSnapshot(latestCtx).then((snapshot) => broadcast(snapshot));
+      }
+      return;
+    }
     if (server) return; // Already running
 
     // Clean up zombie instances from killed tmux panes etc.
@@ -1903,6 +2041,12 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
       const sessionFile = ctx.sessionManager.getSessionFile() || "";
       registerInstance(port, sessionFile, ctx.cwd || process.cwd());
 
+      // Stash the running server so a fresh module closure (created by a
+      // session switch) can adopt it instead of restarting.
+      (globalThis as any)[STASH_KEY] = {
+        server, wss, clients, heartbeatTimer, pendingRequests, mirrorUrl, tailscaleUrl, alive: true,
+      };
+
       ctx.ui.notify(`Tau mirror: ${mirrorUrl}${tailscaleUrl ? `  •  Tailscale: ${tailscaleUrl}` : ""}  •  /qr for QR code`, "info");
     };
 
@@ -1934,7 +2078,13 @@ img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rg
   // ═══════════════════════════════════════
   // Cleanup on shutdown
   // ═══════════════════════════════════════
-  pi.on("session_shutdown", async () => {
+  // The mirror survives session switches (resume / new / fork): the server
+  // keeps running so the browser connection stays up and the "Resumed
+  // session" status line is not replaced by a restart notice. It stops only
+  // on quit and reload (where a fresh extension instance takes over).
+  pi.on("session_shutdown", async (event: any) => {
+    const keepAlive = event?.reason === "resume" || event?.reason === "new" || event?.reason === "fork";
+    if (keepAlive) return;
     stopServer();
     console.log("[Mirror] Server shut down");
   });

@@ -117,6 +117,18 @@
         <div class="mobile-model-bar" id="mobile-model-bar"></div>
         <div class="queued-messages hidden" id="queued-messages"></div>
         <div class="image-previews hidden" id="image-previews"></div>
+        <!-- Session metadata panel: replaces the read-only
+             composer when viewing a historical session in mirror mode -->
+        <div class="session-meta-panel hidden" id="session-meta-panel">
+          <div class="session-meta-info">
+            <div class="session-meta-name" id="session-meta-name"></div>
+            <div class="session-meta-path" id="session-meta-path"></div>
+            <div class="session-meta-snippet" id="session-meta-snippet"></div>
+            <div class="session-meta-activity" id="session-meta-activity"></div>
+            <div class="session-meta-warning hidden" id="session-meta-warning"></div>
+          </div>
+          <button type="button" class="session-meta-resume" id="resume-btn">Resume</button>
+        </div>
         <form id="chat-form">
           <div class="input-left-actions">
             <button type="button" class="input-icon-btn" id="command-btn" title="Commands" aria-label="Open commands" tabindex="-1">

@@ -749,10 +749,100 @@ body {
   animation: pulse 2s infinite;
 }
 
-/* Mirror mode: read-only input */
-.input-area.mirror-readonly {
+/* Mirror mode: read-only composer. The chat form is hidden by
+   the .hidden class; the session metadata panel takes its place and stays
+   fully interactive (the Resume button). */
+
+/* Session metadata panel — shown in the composer area while viewing a
+   historical session in mirror mode */
+.session-meta-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), var(--shadow-inset);
+}
+
+.session-meta-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-meta-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta-snippet {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta-activity {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.session-meta-warning {
+  font-size: 11px;
+  color: var(--warning);
+}
+
+.session-meta-resume {
+  flex-shrink: 0;
+  padding: 9px 18px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+
+.session-meta-resume:hover {
+  opacity: 0.85;
+}
+
+.session-meta-resume:disabled {
   opacity: 0.5;
-  pointer-events: none;
+  cursor: default;
+}
+
+@media (max-width: 768px) {
+  .session-meta-panel {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .session-meta-resume {
+    width: 100%;
+    padding: 10px;
+  }
 }
 
 .session-rename-btn {

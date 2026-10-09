@@ -75,8 +75,13 @@ function makeMocks() {
     _entries: [],
     _navResult: undefined,
     _forkResult: undefined,
+    _switchResult: undefined,
     isIdle: () => ctx._idle,
     waitForIdle: async () => {},
+    switchSession: async (sessionPath, opts) => {
+      events.push({ type: 'switchSession', sessionPath, opts });
+      return ctx._switchResult ?? { cancelled: false };
+    },
     navigateTree: async (entryId) => {
       events.push({ type: 'navigateTree', entryId });
       return ctx._navResult ?? { cancelled: false };
@@ -169,6 +174,7 @@ let events;
 let broadcasts;
 let ctx;
 let handlers;
+let mock2; // Fresh module closure (adoption test)
 
 before(async () => {
   const mock = makeMocks();
@@ -220,6 +226,7 @@ beforeEach(() => {
   ctx._entries = [];
   ctx._navResult = undefined;
   ctx._forkResult = undefined;
+  ctx._switchResult = undefined;
 });
 
 function sendCommand(command) {
@@ -352,4 +359,125 @@ test('unchanged-text edit resends the original content', async () => {
   const send = events.find((e) => e.type === 'sendUserMessage' && e.message === original);
   assert.ok(send, 'the original content was resent');
   assert.equal(send.options.expandPromptTemplates, true);
+});
+
+// ── resume_session ──
+
+const sessionsDir = path.join(tmpHome, '.pi', 'agent', 'sessions');
+
+function writeSessionFile(name, lines) {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const p = path.join(sessionsDir, name);
+  fs.writeFileSync(p, lines.join('\n') + '\n');
+  return p;
+}
+
+const sessionLines = (cwd, id = 's1') => [
+  JSON.stringify({ type: 'session', id, cwd, timestamp: '2026-01-01T00:00:00.000Z' }),
+  JSON.stringify({ type: 'message', message: { role: 'user', content: 'hello' } }),
+];
+
+test('resume_session: busy agent is rejected without dispatch', async () => {
+  ctx._idle = false;
+  const p = writeSessionFile('busy.jsonl', sessionLines(tmpHome));
+  const resp = await sendCommand({ id: 200, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /running/i);
+  assert.ok(!events.some((e) => e.type === 'switchSession'), 'no switch while busy');
+});
+
+test('resume_session: path outside the session directory is rejected', async () => {
+  const outside = path.join(tmpHome, 'outside.jsonl');
+  fs.writeFileSync(outside, JSON.stringify({ type: 'session', id: 'x', cwd: tmpHome }) + '\n');
+  const resp = await sendCommand({ id: 201, type: 'resume_session', sessionFile: outside });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /session directory/i);
+  assert.ok(!events.some((e) => e.type === 'switchSession'), 'no switch for an outside path');
+});
+
+test('resume_session: missing file is rejected', async () => {
+  const missing = path.join(sessionsDir, 'nope.jsonl');
+  const resp = await sendCommand({ id: 202, type: 'resume_session', sessionFile: missing });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /not found/i);
+  assert.ok(!events.some((e) => e.type === 'switchSession'), 'no switch for a missing file');
+});
+
+test('resume_session: non-JSONL path is rejected', async () => {
+  const p = writeSessionFile('notjsonl.jsonl', [
+    JSON.stringify({ type: 'message', message: { role: 'user', content: 'hi' } }),
+  ]);
+  const resp = await sendCommand({ id: 203, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /not a session file/i);
+  assert.ok(!events.some((e) => e.type === 'switchSession'), 'no switch for a non-JSONL file');
+});
+
+test('resume_session: missing recorded directory is rejected with a distinct error', async () => {
+  const p = writeSessionFile('gonedocwd.jsonl', sessionLines(path.join(tmpHome, 'gone')));
+  const resp = await sendCommand({ id: 204, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /no longer exists/i);
+  assert.ok(!events.some((e) => e.type === 'switchSession'), 'no switch for a missing recorded directory');
+});
+
+test('a valid resume_session reaches the session switch with the resolved path', async () => {
+  const p = writeSessionFile('valid.jsonl', sessionLines(tmpHome));
+  const resp = await sendCommand({ id: 205, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, true);
+  assert.equal(resp.data.dispatched, true);
+  // Dispatch goes through the hidden command line, like re-ask / edit / fork.
+  const dispatch = events.find((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-resume'));
+  assert.ok(dispatch, 'a /tau-resume command was dispatched');
+  assert.ok(dispatch.message.includes(p), 'command line contains the session path');
+  await waitFor(() => events.some((e) => e.type === 'switchSession'));
+  const sw = events.find((e) => e.type === 'switchSession');
+  assert.equal(sw.sessionPath, path.resolve(p), 'switchSession got the resolved path');
+});
+
+test('a cancelled switch broadcasts an error notice', async () => {
+  const p = writeSessionFile('cancelled.jsonl', sessionLines(tmpHome));
+  ctx._switchResult = { cancelled: true };
+  const resp = await sendCommand({ id: 206, type: 'resume_session', sessionFile: p });
+  assert.equal(resp.success, true);
+  await waitFor(() => broadcasts.some((m) => m.type === 'notice' && m.level === 'error'));
+  const sw = events.find((e) => e.type === 'switchSession');
+  assert.ok(sw, 'switchSession was attempted');
+});
+
+test('the mirror server survives a resume switch', async () => {
+  // A real switch emits session_shutdown(reason: "resume") for the old
+  // session. The server must stay up so the browser connection does not
+  // drop and a restart notice cannot clobber the resume status line.
+  for (const h of handlers.session_shutdown || []) await h({ type: 'session_shutdown', reason: 'resume' }, ctx);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(ws.readyState, WebSocket.OPEN, 'the browser connection survives the resume switch');
+});
+
+test('a fresh module closure adopts the running server instead of restarting', async () => {
+  // pi re-executes the extension module on every session switch (fresh
+  // closure, same pid). The new closure must adopt the stashed server:
+  // same port, same sockets, no second listener.
+  const jiti2 = require('jiti')(import.meta.url);
+  const ext2 = jiti2(new URL('../extensions/mirror-server.ts', import.meta.url).pathname).default;
+  mock2 = makeMocks();
+  ext2(mock2.pi);
+  const before = broadcasts.length;
+  for (const h of mock2.handlers.session_start || []) await h({ type: 'session_start' }, mock2.ctx);
+  // Adoption re-broadcasts the snapshot over the surviving connections.
+  await waitFor(() => broadcasts.slice(before).some((m) => m.type === 'mirror_sync'));
+  assert.equal(ws.readyState, WebSocket.OPEN, 'the browser connection was not restarted');
+  // No second listener on the next port.
+  const probe = await new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port: PORT + 1, path: '/api/health' }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.on('error', () => resolve(null));
+  });
+  assert.equal(probe, null, 'no second server on the next port');
+});
+
+test('a quit stops the shared server', async () => {
+  // The fresh closure now owns the shared server: its quit must stop it
+  // (last test: teardown follows).
+  for (const h of mock2.handlers.session_shutdown || []) await h({ type: 'session_shutdown', reason: 'quit' }, mock2.ctx);
+  await waitFor(() => ws.readyState !== WebSocket.OPEN, 5000);
 });

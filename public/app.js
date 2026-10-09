@@ -44,6 +44,15 @@ const refreshSessionsBtn = document.getElementById('refresh-sessions-btn');
 const sessionSearchInput = document.getElementById('session-search-input');
 const typingIndicator = document.getElementById('typing-indicator');
 
+// Session metadata panel
+const sessionMetaPanel = document.getElementById('session-meta-panel');
+const sessionMetaName = document.getElementById('session-meta-name');
+const sessionMetaPath = document.getElementById('session-meta-path');
+const sessionMetaSnippet = document.getElementById('session-meta-snippet');
+const sessionMetaActivity = document.getElementById('session-meta-activity');
+const sessionMetaWarning = document.getElementById('session-meta-warning');
+const resumeBtn = document.getElementById('resume-btn');
+
 const sessionCostEl = document.getElementById('session-cost');
 const tokenUsageEl = document.getElementById('token-usage');
 const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
@@ -67,6 +76,11 @@ let mirrorActiveSessionFile = null; // The live session file path from the TUI
 let viewingActiveSession = true; // Whether we're viewing the live session or a historical one
 let isMirrorMode = false; // Set when mirror_sync received
 let liveInstances = []; // All running Tau instances [{port, sessionFile, cwd}]
+// The historical session currently viewed (from the sidebar list). Feeds
+// the metadata panel in the read-only composer area.
+let viewedSession = null; // { filePath, name, firstMessage, mtime, cwd, ... }
+let viewedProject = null; // { path, dirName, sessions }
+let resumePending = false; // A resume_session dispatch is in flight
 
 // File browser
 const fileSidebar = document.getElementById('file-sidebar');
@@ -249,9 +263,21 @@ wsClient.addEventListener('mirrorSync', (e) => {
 // command response. Show an error toast; the editor stays open with the text
 // intact so the user can retry.
 wsClient.addEventListener('commandResponse', (e) => {
-  const { command, success, error } = e.detail || {};
+  const { command, success, error, data } = e.detail || {};
   if (command === 'edit' && success === false) {
     showNotice('error', error || 'Edit failed');
+  }
+  if (command === 'resume_session') {
+    if (success === false) {
+      // Rejected before dispatch: re-enable the button and surface the reason.
+      resumePending = false;
+      resumeBtn.disabled = false;
+      showNotice('error', error || 'Resume failed');
+    } else if (data?.liveElsewhere) {
+      // Warning only — the switch proceeds. The snapshot that follows a
+      // successful dispatch re-renders the view and re-enables the button.
+      showNotice('warning', 'Session is live on another instance — resuming gives one transcript two writers');
+    }
   }
 });
 
@@ -273,6 +299,21 @@ function showNotice(level, text) {
 wsClient.addEventListener('notice', (e) => {
   const { level, text } = e.detail || {};
   showNotice(level, text);
+  if (level === 'error') {
+    // A cancelled or failed switch keeps the historical view; let the user
+    // retry the Resume button.
+    resumePending = false;
+    resumeBtn.disabled = false;
+  }
+});
+
+// Resume: dispatch the resume_session RPC. On success the
+// session-start snapshot re-renders the history and re-enables the composer.
+resumeBtn.addEventListener('click', () => {
+  if (resumePending || !viewedSession) return;
+  resumePending = true;
+  resumeBtn.disabled = true;
+  wsClient.send({ type: 'resume_session', sessionFile: viewedSession.filePath });
 });
 
 // ═══════════════════════════════════════
@@ -1245,6 +1286,8 @@ sidebarOverlay.addEventListener('click', () => {
 
 const newSessionBtn = document.getElementById('new-session-btn');
 newSessionBtn.addEventListener('click', () => {
+  viewedSession = null;
+  viewedProject = null;
   sessionTotalCost = 0;
   lastInputTokens = 0;
   updateCostDisplay();
@@ -1372,6 +1415,9 @@ function activeBranch(entries) {
 }
 
 async function switchSession(sessionFile, session = null, project = null) {
+  // The metadata panel shows these facts for the viewed session.
+  viewedSession = session;
+  viewedProject = project;
   try {
     // Clear any streaming state from previous session to prevent bleed
     currentStreamingElement = null;
@@ -1523,6 +1569,7 @@ async function pollInstances() {
       const data = await res.json();
       liveInstances = data.instances || [];
       updateMirrorLiveIndicator();
+      updateSessionMetaPanel(); // keep the live-elsewhere note current
     }
   } catch {}
 }
@@ -1547,13 +1594,62 @@ function syncComposerState() {
 function updateMirrorInputState() {
   if (!isMirrorMode) return;
 
+  const readOnly = !viewingActiveSession;
   const inputArea = document.querySelector('.input-area');
-  if (viewingActiveSession) {
-    inputArea?.classList.remove('mirror-readonly');
-  } else {
-    inputArea?.classList.add('mirror-readonly');
-  }
+  inputArea?.classList.toggle('mirror-readonly', readOnly);
+  // The metadata panel replaces the read-only composer.
+  chatForm.classList.toggle('hidden', readOnly);
+  updateSessionMetaPanel();
   syncComposerState();
+}
+
+// ── Session metadata panel ──
+// Shows the viewed historical session's facts plus the Resume button.
+// Data comes from the sidebar session list and the instance poll; no
+// new read endpoints.
+
+function currentInstancePort() {
+  return new URL(wsClient.url).port * 1;
+}
+
+function findLiveElsewhere(sessionFile) {
+  return liveInstances.find(i => i.sessionFile === sessionFile && i.port !== currentInstancePort());
+}
+
+function formatLastActive(mtime) {
+  if (!mtime) return '';
+  const diffMs = Date.now() - mtime;
+  const mins = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return new Date(mtime).toLocaleDateString([], { weekday: 'long' });
+  return new Date(mtime).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function updateSessionMetaPanel() {
+  const readOnly = isMirrorMode && !viewingActiveSession;
+  if (!readOnly || !viewedSession) {
+    sessionMetaPanel.classList.add('hidden');
+    resumePending = false;
+    resumeBtn.disabled = false;
+    return;
+  }
+  sessionMetaName.textContent = viewedSession.name || viewedSession.firstMessage || 'Untitled';
+  sessionMetaPath.textContent = viewedProject?.path || viewedSession.cwd || '';
+  sessionMetaSnippet.textContent = viewedSession.firstMessage || '';
+  sessionMetaActivity.textContent = formatLastActive(viewedSession.mtime || 0);
+  const elsewhere = findLiveElsewhere(viewedSession.filePath);
+  if (elsewhere) {
+    sessionMetaWarning.textContent = `Live on another instance (port ${elsewhere.port})`;
+    sessionMetaWarning.classList.remove('hidden');
+  } else {
+    sessionMetaWarning.classList.add('hidden');
+  }
+  sessionMetaPanel.classList.remove('hidden');
 }
 
 // ═══════════════════════════════════════
