@@ -49,6 +49,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-test-'));
 process.env.HOME = tmpHome;
 process.env.TAU_MIRROR_PORT = String(PORT);
 process.env.TAU_HOST = '127.0.0.1';
+process.env.TAU_BASE_PATH = '/agent/43221/';
 process.env.TAU_STATIC_DIR = path.resolve(new URL('../public', import.meta.url).pathname);
 
 const { WebSocket } = require('ws');
@@ -544,6 +545,63 @@ test('a second resume_session dispatches via the fresh pi api, not the stale fir
   await waitFor(() => mock4.events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-resume')));
 
   firstPi.sendUserMessage = originalSend;
+});
+
+// ── instance identity: (basePath, pid) ──
+
+const instancesDir = path.join(tmpHome, '.pi', 'tau-instances');
+
+test('registry entry written at listen carries basePath alongside port, pid, sessionFile, and cwd', async () => {
+  const entry = JSON.parse(fs.readFileSync(path.join(instancesDir, `${process.pid}.json`), 'utf8'));
+  assert.equal(entry.port, PORT);
+  assert.equal(entry.pid, process.pid);
+  assert.equal(entry.sessionFile, path.join(tmpHome, 'test-session.jsonl'));
+  assert.equal(entry.cwd, tmpHome);
+  assert.equal(entry.basePath, '/agent/43221/');
+});
+
+test('/api/instances exposes the running instance with its basePath', async () => {
+  const res = await fetch(`http://127.0.0.1:${PORT}/api/instances`);
+  const data = await res.json();
+  const mine = data.instances.find((i) => i.pid === process.pid);
+  assert.ok(mine, 'this instance is listed');
+  assert.equal(mine.basePath, '/agent/43221/');
+  assert.equal(mine.port, PORT);
+});
+
+test('on-connect snapshot carries pid, basePath, and isStreaming', async () => {
+  // Pin a fresh ctx as the shared latest ctx so its idle knob drives the
+  // snapshot the new client receives.
+  const jitiSnap = require('jiti')(import.meta.url);
+  const extSnap = jitiSnap(new URL('../extensions/mirror-server.ts', import.meta.url).pathname).default;
+  const mockSnap = makeMocks();
+  extSnap(mockSnap.pi);
+  for (const h of mockSnap.handlers.session_start || []) await h({ type: 'session_start' }, mockSnap.ctx);
+
+  const connect = () => new Promise((resolve, reject) => {
+    const c = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+    c.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'mirror_sync') resolve({ c, msg });
+    });
+    c.on('error', reject);
+  });
+  const close = ({ c }) => new Promise((resolve) => { c.on('close', resolve); c.close(); });
+
+  // Idle: the mock ctx is idle by default.
+  const idle = await connect();
+  assert.equal(idle.msg.pid, process.pid, 'snapshot carries the serving pid');
+  assert.equal(idle.msg.basePath, '/agent/43221/', 'snapshot carries the serving base path');
+  assert.equal(idle.msg.isStreaming, false, 'idle snapshot reports isStreaming false');
+  await close(idle);
+
+  // Streaming: the agent is mid-turn.
+  mockSnap.ctx._idle = false;
+  const busy = await connect();
+  assert.equal(busy.msg.isStreaming, true, 'mid-turn snapshot reports isStreaming true');
+  await close(busy);
+
+  mockSnap.ctx._idle = true;
 });
 
 test('a quit stops the shared server', async () => {

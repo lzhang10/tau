@@ -86,11 +86,16 @@ const USER_HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(USER_HOME, ".pi", "agent");
 const SESSIONS_DIR = process.env.PI_CODING_AGENT_SESSION_DIR || path.join(PI_AGENT_DIR, "sessions");
 const INSTANCES_DIR = path.join(USER_HOME, ".pi", "tau-instances");
+// The instance's URL base path (TAU_BASE_PATH, e.g. /agent/43221/; empty at
+// root). Globally unique across containers by the dashboard port contract,
+// identical for every process in a container. With the pid (unique within
+// one PID namespace) it forms the instance identity — ports never do.
+const BASE_PATH = process.env.TAU_BASE_PATH || "";
 
 // Instance registry — tracks all running Tau servers
 function registerInstance(port: number, sessionFile: string, cwd: string) {
   fs.mkdirSync(INSTANCES_DIR, { recursive: true });
-  const info = { port, pid: process.pid, sessionFile, cwd, startedAt: new Date().toISOString() };
+  const info = { port, pid: process.pid, sessionFile, cwd, basePath: BASE_PATH, startedAt: new Date().toISOString() };
   fs.writeFileSync(path.join(INSTANCES_DIR, `${process.pid}.json`), JSON.stringify(info));
 }
 
@@ -108,7 +113,7 @@ function unregisterInstance() {
   try { fs.unlinkSync(path.join(INSTANCES_DIR, `${process.pid}.json`)); } catch {}
 }
 
-function getRunningInstances(): Array<{ port: number; pid: number; sessionFile: string; cwd: string }> {
+function getRunningInstances(): Array<{ port: number; pid: number; sessionFile: string; cwd: string; basePath: string }> {
   if (!fs.existsSync(INSTANCES_DIR)) return [];
   const instances: any[] = [];
   for (const file of fs.readdirSync(INSTANCES_DIR)) {
@@ -118,7 +123,8 @@ function getRunningInstances(): Array<{ port: number; pid: number; sessionFile: 
       // Check if process is still alive
       try {
         process.kill(info.pid, 0);
-        instances.push(info);
+        // Normalize for entries written before basePath existed.
+        instances.push({ ...info, basePath: info.basePath || "" });
       } catch {
         // Process dead — clean up stale file
         try { fs.unlinkSync(path.join(INSTANCES_DIR, file)); } catch {}
@@ -644,6 +650,11 @@ export default function (pi: ExtensionAPI) {
       thinkingLevel,
       sessionName,
       sessionFile,
+      // Instance identity of the serving instance — the authority for the
+      // client's self-identity (the page URL goes stale after a
+      // cross-instance WebSocket switch).
+      pid: process.pid,
+      basePath: BASE_PATH,
       isStreaming: !ctx.isIdle(),
       contextUsage,
     };

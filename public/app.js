@@ -75,7 +75,12 @@ let lastUsage = null; // Full usage object for context visualiser
 let mirrorActiveSessionFile = null; // The live session file path from the TUI
 let viewingActiveSession = true; // Whether we're viewing the live session or a historical one
 let isMirrorMode = false; // Set when mirror_sync received
-let liveInstances = []; // All running Tau instances [{port, sessionFile, cwd}]
+let liveInstances = []; // All running Tau instances [{port, pid, basePath, sessionFile, cwd}]
+// The instance serving this page, per the latest on-connect snapshot.
+// The snapshot is the authority for self-identity: the page URL goes stale
+// after a cross-instance WebSocket switch, so identity is never derived
+// from it. Identity is the pair (basePath, pid) — ports never carry it.
+let servingInstance = { basePath: '', pid: null };
 // The historical session currently viewed (from the sidebar list). Feeds
 // the metadata panel in the read-only composer area.
 let viewedSession = null; // { filePath, name, firstMessage, lastMessage, mtime, cwd, ... }
@@ -1457,12 +1462,11 @@ async function switchSession(sessionFile, session = null, project = null) {
     // In mirror mode, check if this session is live on any instance
     if (isMirrorMode) {
       // Check if this session is live on a different instance
-      const otherInstance = liveInstances.find(i => i.sessionFile === sessionFile && i.port !== new URL(wsClient.url).port * 1);
+      const otherInstance = liveInstances.find(i => i.sessionFile === sessionFile && !isSameInstance(i));
       if (otherInstance) {
         // Reconnect to the other instance
-        const protocol = document.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const newUrl = `${protocol}//${location.hostname}:${otherInstance.port}/ws`;
-        console.log(`[App] Switching to instance on port ${otherInstance.port}`);
+        const newUrl = instanceWsUrl(otherInstance);
+        console.log(`[App] Switching to instance (${otherInstance.basePath || 'root'} pid ${otherInstance.pid})`);
         wsClient.disconnect();
         wsClient.url = newUrl;
         wsClient.forceReconnect();
@@ -1506,6 +1510,9 @@ function handleMirrorSync(data) {
   console.log('[Mirror] Received state snapshot:', data.entries?.length, 'entries');
   isMirrorMode = true;
 
+  // The snapshot is the authority for the serving instance's identity.
+  servingInstance = { basePath: data.basePath || '', pid: data.pid ?? null };
+
   // Track the active session
   const newSessionFile = data.sessionFile || null;
   const sessionChanged = newSessionFile !== mirrorActiveSessionFile;
@@ -1548,6 +1555,19 @@ function handleMirrorSync(data) {
 
   updateCostDisplay();
   updateTokenUsage();
+
+  // Catch-up for a fresh view of a working instance: the snapshot reports
+  // the agent mid-turn, so enter the working state through the existing
+  // update path (status, typing indicator, abort button) and seed a
+  // placeholder streaming element for in-flight thinking/text deltas to
+  // attach to. The state guard keeps re-syncs mid-stream from seeding a
+  // second element.
+  if (data.isStreaming && !state.isStreaming) {
+    handleAgentStart();
+    currentStreamingText = '';
+    currentStreamingThinking = '';
+    currentStreamingElement = messageRenderer.renderAssistantMessage({ content: '' }, true);
+  }
 }
 
 // Mark all live sessions in the sidebar with a green dot
@@ -1608,12 +1628,25 @@ function updateMirrorInputState() {
 // Data comes from the sidebar session list and the instance poll; no
 // new read endpoints.
 
-function currentInstancePort() {
-  return new URL(wsClient.url).port * 1;
+// Instance identity is the pair (basePath, pid): the prefix distinguishes
+// containers, the pid distinguishes instances within one container. Ports
+// never carry identity — every container wears the same local port.
+function isSameInstance(i) {
+  return servingInstance.pid !== null
+    && i.pid === servingInstance.pid
+    && (i.basePath || '') === servingInstance.basePath;
+}
+
+// Cross-instance WebSocket address: through the target's URL prefix on the
+// page origin when it has one (dashboard tunnel), host:port at root.
+function instanceWsUrl(i) {
+  const proto = document.location.protocol === 'https:' ? 'wss' : 'ws';
+  if (i.basePath) return `${proto}://${location.host}${i.basePath}ws`;
+  return `${proto}://${location.hostname}:${i.port}/ws`;
 }
 
 function findLiveElsewhere(sessionFile) {
-  return liveInstances.find(i => i.sessionFile === sessionFile && i.port !== currentInstancePort());
+  return liveInstances.find(i => i.sessionFile === sessionFile && !isSameInstance(i));
 }
 
 function formatLastActive(mtime) {
@@ -1647,7 +1680,9 @@ function updateSessionMetaPanel() {
   sessionMetaActivity.textContent = formatLastActive(viewedSession.mtime || 0);
   const elsewhere = findLiveElsewhere(viewedSession.filePath);
   if (elsewhere) {
-    sessionMetaWarning.textContent = `Live on another instance (port ${elsewhere.port})`;
+    sessionMetaWarning.textContent = elsewhere.basePath
+      ? `Live on another instance (${elsewhere.basePath})`
+      : `Live on another instance (port ${elsewhere.port})`;
     sessionMetaWarning.classList.remove('hidden');
   } else {
     sessionMetaWarning.classList.add('hidden');
