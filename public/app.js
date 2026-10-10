@@ -86,6 +86,7 @@ let servingInstance = { basePath: '', pid: null };
 let viewedSession = null; // { filePath, name, firstMessage, lastMessage, mtime, cwd, ... }
 let viewedProject = null; // { path, dirName, sessions }
 let resumePending = false; // A resume_session dispatch is in flight
+let newSessionPending = false; // A new_session dispatch is in flight
 
 // File browser
 const fileSidebar = document.getElementById('file-sidebar');
@@ -284,6 +285,12 @@ wsClient.addEventListener('commandResponse', (e) => {
       showNotice('warning', 'Session is live on another instance — resuming gives one transcript two writers');
     }
   }
+  if (command === 'new_session' && success === false) {
+    // Rejected before dispatch: re-enable the button and surface the reason.
+    newSessionPending = false;
+    newSessionBtn.disabled = false;
+    showNotice('error', error || 'New session failed');
+  }
 });
 
 // Notice toast for tree command outcomes
@@ -309,6 +316,10 @@ wsClient.addEventListener('notice', (e) => {
     // retry the Resume button.
     resumePending = false;
     resumeBtn.disabled = false;
+    // A cancelled or failed new session keeps the current view; let the
+    // user retry the New session button.
+    newSessionPending = false;
+    newSessionBtn.disabled = false;
   }
 });
 
@@ -1289,21 +1300,15 @@ sidebarOverlay.addEventListener('click', () => {
 
 
 
+// New session: dispatch the new_session RPC. On success the
+// session-start snapshot is the single authority that re-renders the
+// transcript, enables the composer, and refreshes the sidebar.
 const newSessionBtn = document.getElementById('new-session-btn');
 newSessionBtn.addEventListener('click', () => {
-  viewedSession = null;
-  viewedProject = null;
-  sessionTotalCost = 0;
-  lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
-  state.reset();
-  messageRenderer.clear();
-  toolCardRenderer.clear();
-  messageRenderer.renderWelcome();
-  sidebar.clearActive();
-  viewingActiveSession = true;
-  updateMirrorInputState();
+  if (newSessionPending) return;
+  newSessionPending = true;
+  newSessionBtn.disabled = true;
+  wsClient.send({ type: 'new_session' });
 });
 
 refreshSessionsBtn.addEventListener('click', () => {
@@ -1361,20 +1366,6 @@ refreshSessionsBtn.addEventListener('click', () => {
 sessionSearchInput.addEventListener('input', () => {
   sidebar.setSearchQuery(sessionSearchInput.value);
 });
-
-async function newSession() {
-  sessionTotalCost = 0;
-  lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
-  await switchSession(null);
-  sidebar.clearActive();
-  if (isMobile()) {
-    sidebarEl.classList.add('collapsed');
-    sidebarOverlay.classList.remove('visible');
-  }
-  if (!isMobile()) messageInput.focus();
-}
 
 async function handleSessionSelect(session, project) {
   sidebar.setActive(session.filePath);
@@ -1520,6 +1511,11 @@ function handleMirrorSync(data) {
   viewingActiveSession = true;
   updateMirrorInputState();
   updateMirrorLiveIndicator();
+
+  // The snapshot is the authority: it follows a successful new session and
+  // reaches every tab, so re-enable the New session button here.
+  newSessionPending = false;
+  newSessionBtn.disabled = false;
 
   // Fork / session switch: the session_start event can arrive
   // while the socket is down, so refresh the sidebar from the snapshot.

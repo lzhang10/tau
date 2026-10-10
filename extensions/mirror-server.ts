@@ -488,6 +488,37 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ═════════════════════════════════════════════
+  // /tau-new — hidden new-session command
+  // Dispatched by the WS handler (new_session) so the pi
+  // dispatcher runs it without adding a user entry to the session.
+  // The switch uses ctx.newSession, the same operation the TUI's
+  // built-in /new command uses, so browser and terminal share one
+  // code path. The session-start snapshot that follows re-renders
+  // the browser.
+  // ═════════════════════════════════════════════
+  pi.registerCommand("tau-new", {
+    description: "Start a new live session (hidden — dispatched by the Tau mirror)",
+    handler: async (_args, ctx) => {
+      try {
+        await ctx.waitForIdle();
+        const result = await ctx.newSession({
+          // TUI status line so a terminal watcher sees the browser new session.
+          withSession: async (next) => {
+            next.ui.notify("New session started", "info");
+          },
+        });
+        if (result.cancelled) {
+          broadcastNotice("error", "New session cancelled");
+        }
+        // On success the session-start snapshot re-renders the browser; no
+        // notice is needed.
+      } catch (e: any) {
+        broadcastNotice("error", `New session failed: ${e?.message || e}`);
+      }
+    },
+  });
+
   // Event forwarding — subscribe to all Pi events
   // ═══════════════════════════════════════
   const eventTypes = [
@@ -1065,6 +1096,24 @@ export default function (pi: ExtensionAPI) {
           );
           sendTo(ws, success("resume_session", { dispatched: true, liveElsewhere }));
           pi.sendUserMessage(`/tau-resume ${resolved}`, { expandPromptTemplates: true });
+          break;
+        }
+
+        // Start a fresh live session. The previous live session becomes
+        // a historical session. On success the hidden /tau-new command is
+        // dispatched; the session-start snapshot that follows re-renders
+        // the browser and refreshes the sidebar.
+        case "new_session": {
+          if (!ctx) {
+            sendTo(ws, error("new_session", "No context available"));
+            break;
+          }
+          if (!ctx.isIdle()) {
+            sendTo(ws, error("new_session", "Agent is running. Wait for it to finish."));
+            break;
+          }
+          sendTo(ws, success("new_session", { dispatched: true }));
+          pi.sendUserMessage("/tau-new", { expandPromptTemplates: true });
           break;
         }
 

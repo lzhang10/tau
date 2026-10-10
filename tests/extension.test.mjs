@@ -78,6 +78,7 @@ function makeMocks() {
     _navResult: undefined,
     _forkResult: undefined,
     _switchResult: undefined,
+    _newResult: undefined,
     // Mirrors pi's ExtensionRunner.assertActive: throws once a session
     // replacement invalidates the ctx, so tests can exercise the stale-ctx
     // path a real resume triggers.
@@ -89,6 +90,10 @@ function makeMocks() {
     switchSession: async (sessionPath, opts) => {
       events.push({ type: 'switchSession', sessionPath, opts });
       return ctx._switchResult ?? { cancelled: false };
+    },
+    newSession: async (opts) => {
+      events.push({ type: 'newSession', opts });
+      return ctx._newResult ?? { cancelled: false };
     },
     navigateTree: async (entryId) => {
       events.push({ type: 'navigateTree', entryId });
@@ -238,6 +243,7 @@ beforeEach(() => {
   ctx._navResult = undefined;
   ctx._forkResult = undefined;
   ctx._switchResult = undefined;
+  ctx._newResult = undefined;
 });
 
 function sendCommand(command) {
@@ -454,6 +460,58 @@ test('a cancelled switch broadcasts an error notice', async () => {
   await waitFor(() => broadcasts.some((m) => m.type === 'notice' && m.level === 'error'));
   const sw = events.find((e) => e.type === 'switchSession');
   assert.ok(sw, 'switchSession was attempted');
+});
+
+// ── new_session ──
+
+test('new_session: busy agent is rejected without dispatch', async () => {
+  ctx._idle = false;
+  const resp = await sendCommand({ id: 400, type: 'new_session' });
+  assert.equal(resp.success, false);
+  assert.match(resp.error, /running/i);
+  assert.ok(!events.some((e) => e.type === 'newSession'), 'no new session while busy');
+  assert.ok(!events.some((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-new')), 'no dispatch while busy');
+});
+
+test('a valid new_session dispatches the hidden command and reaches the new-session operation', async () => {
+  const resp = await sendCommand({ id: 401, type: 'new_session' });
+  assert.equal(resp.success, true);
+  assert.equal(resp.data.dispatched, true);
+  // Dispatch goes through the hidden command line, like resume / edit / fork.
+  const dispatch = events.find((e) => e.type === 'sendUserMessage' && e.message.startsWith('/tau-new'));
+  assert.ok(dispatch, 'a /tau-new command was dispatched');
+  await waitFor(() => events.some((e) => e.type === 'newSession'));
+});
+
+test('a cancelled new session broadcasts an error notice', async () => {
+  ctx._newResult = { cancelled: true };
+  const resp = await sendCommand({ id: 402, type: 'new_session' });
+  assert.equal(resp.success, true);
+  const ns = events.find((e) => e.type === 'newSession');
+  assert.ok(ns, 'newSession was attempted');
+  await waitFor(() => broadcasts.some((m) => m.type === 'notice' && m.level === 'error'));
+});
+
+test('the server survives a new-session switch, and a fresh connection gets a current snapshot', async () => {
+  // A real switch emits session_shutdown(reason: "new") for the old
+  // session. The server must stay up so the browser connection does not
+  // drop, and a new client gets the current snapshot.
+  for (const h of handlers.session_shutdown || []) await h({ type: 'session_shutdown', reason: 'new' }, ctx);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(ws.readyState, WebSocket.OPEN, 'the browser connection survives the new-session switch');
+
+  const ws2 = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+  const snapshot = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no snapshot after new-session reconnect')), 5000);
+    ws2.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === 'mirror_sync') { clearTimeout(timer); resolve(msg); }
+    });
+    ws2.on('error', reject);
+  });
+  await new Promise((resolve) => { ws2.on('close', resolve); ws2.close(); });
+  assert.ok(snapshot, 'a fresh snapshot was sent to the reconnecting client');
+  assert.equal(snapshot.sessionFile, path.join(tmpHome, 'test-session.jsonl'));
 });
 
 test('the mirror server survives a resume switch', async () => {
