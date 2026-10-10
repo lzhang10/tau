@@ -16,6 +16,10 @@ _Avoid_: old session, past session, archived session
 Make a historical session the live session of the mirrored pi process. The agent's working directory follows the directory recorded in the session.
 _Avoid_: reopen, restore, continue
 
+**New session**:
+Start a fresh live session in the mirrored pi process. The previous live session becomes a historical session.
+_Avoid_: fresh session, blank session
+
 **Instance registry**:
 The per-user record of running pi instances that carry Tau. Each entry holds the instance's port, URL prefix, pid, current session, and working directory. It is container-local and never mounted.
 _Avoid_: instance list, process table
